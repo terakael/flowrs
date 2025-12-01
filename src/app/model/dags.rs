@@ -609,9 +609,16 @@ impl Widget for &mut DagModel {
                 // Determine DAG color based on recent runs
                 let color = self.get_dag_color(item);
                 
+                // Determine text color for DAG name
+                let text_color = if item.is_paused {
+                    Color::DarkGray
+                } else {
+                    Color::Reset
+                };
+                
                 Row::new(vec![
                     Line::from(Span::styled("■", Style::default().fg(color))),
-                    Line::from(highlight_search_term(&item.dag_id, search_term, Color::Reset)),
+                    Line::from(highlight_search_term(&item.dag_id, search_term, text_color)),
                     {
                         let schedule = item.timetable_description.as_deref().unwrap_or("None");
                         // Shorten "Never, external triggers only" to just "Never"
