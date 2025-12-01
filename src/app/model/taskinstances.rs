@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::vec;
 
 use super::popup::commands_help::CommandPopUp;
@@ -11,6 +12,7 @@ use ratatui::style::{Modifier, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, BorderType, Borders, Row, StatefulWidget, Table, Widget};
 
+use crate::airflow::graph_layout::GraphPrefix;
 use crate::airflow::model::common::TaskInstance;
 use crate::app::events::custom::FlowrsEvent;
 use crate::ui::common::{create_headers, state_to_colored_square};
@@ -32,6 +34,7 @@ pub struct TaskInstanceModel {
     pub marked: Vec<usize>,
     commands: Option<&'static CommandPopUp<'static>>,
     pub error_popup: Option<ErrorPopup>,
+    pub graph_layout: HashMap<String, GraphPrefix>,
     ticks: u32,
     event_buffer: Vec<FlowrsEvent>,
 }
@@ -48,6 +51,7 @@ impl TaskInstanceModel {
             marked: vec![],
             commands: None,
             error_popup: None,
+            graph_layout: HashMap::new(),
             ticks: 0,
             event_buffer: vec![],
         }
@@ -284,50 +288,68 @@ impl Widget for &mut TaskInstanceModel {
 
         let selected_style = crate::ui::constants::SELECTED_STYLE;
 
-        let headers = ["Task ID", "Duration", "State", "Tries"];
+        let headers = ["Graph", "Task ID", "Duration", "State", "Tries"];
         let header_row = create_headers(headers);
         let header =
             Row::new(header_row).style(DEFAULT_STYLE.reversed().add_modifier(Modifier::BOLD));
 
         let rows = self.filtered.items.iter().enumerate().map(|(idx, item)| {
+            // Get graph prefix for this task (depth-based indentation)
+            let graph_prefix = self.graph_layout
+                .get(&item.task_id)
+                .map(|prefix| {
+                    let rendered = prefix.render();
+                    // Add circle marker after the connectors
+                    format!("{}◉", rendered)
+                })
+                .unwrap_or_else(|| "◉".to_string());
+            
+            // Determine state and color
+            let (state_text, state_color) = if let Some(state) = &item.state {
+                let color = match state.as_str() {
+                    "success" => AirflowStateColor::Success,
+                    "running" => AirflowStateColor::Running,
+                    "failed" => AirflowStateColor::Failed,
+                    "queued" => AirflowStateColor::Queued,
+                    "up_for_retry" => AirflowStateColor::UpForRetry,
+                    "upstream_failed" => AirflowStateColor::UpstreamFailed,
+                    _ => AirflowStateColor::None,
+                };
+                (state.clone(), color)
+            } else {
+                ("None".to_string(), AirflowStateColor::None)
+            };
+            
             Row::new(vec![
+                Line::from(graph_prefix),
                 Line::from(item.task_id.as_str()),
                 Line::from(if let Some(duration) = item.duration {
                     format!("{}", duration.ceil() as i64)
                 } else {
                     "None".to_string()
                 }),
-                Line::from(if let Some(state) = &item.state {
-                    match state.as_str() {
-                        "success" => state_to_colored_square(AirflowStateColor::Success),
-                        "running" => state_to_colored_square(AirflowStateColor::Running),
-                        "failed" => state_to_colored_square(AirflowStateColor::Failed),
-                        "queued" => state_to_colored_square(AirflowStateColor::Queued),
-                        "up_for_retry" => state_to_colored_square(AirflowStateColor::UpForRetry),
-                        "upstream_failed" => {
-                            state_to_colored_square(AirflowStateColor::UpstreamFailed)
-                        }
-                        _ => state_to_colored_square(AirflowStateColor::None),
-                    }
-                } else {
-                    state_to_colored_square(AirflowStateColor::None)
-                }),
+                Line::from(state_text),
                 Line::from(format!("{:?}", item.try_number)),
             ])
             .style(if self.marked.contains(&idx) {
                 DEFAULT_STYLE.bg(MARKED_COLOR)
-            } else if (idx % 2) == 0 {
-                DEFAULT_STYLE
             } else {
-                DEFAULT_STYLE.bg(ALTERNATING_ROW_COLOR)
+                // Color the entire row based on state
+                let base_style = if (idx % 2) == 0 {
+                    DEFAULT_STYLE
+                } else {
+                    DEFAULT_STYLE.bg(ALTERNATING_ROW_COLOR)
+                };
+                base_style.fg(state_color.into())
             })
         });
         let t = Table::new(
             rows,
             &[
+                Constraint::Length(15),
                 Constraint::Fill(1),
                 Constraint::Length(10),
-                Constraint::Length(5),
+                Constraint::Length(16),
                 Constraint::Length(5),
             ],
         )

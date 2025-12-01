@@ -74,6 +74,7 @@ pub struct EnvironmentData {
     pub dags: HashMap<DagId, DagData>,
     pub dag_details: HashMap<DagId, Dag>,
     pub task_order: HashMap<DagId, Vec<String>>,
+    pub task_dependencies: HashMap<DagId, HashMap<String, Vec<String>>>,
 }
 
 impl EnvironmentData {
@@ -83,6 +84,7 @@ impl EnvironmentData {
             dags: HashMap::new(),
             dag_details: HashMap::new(),
             task_order: HashMap::new(),
+            task_dependencies: HashMap::new(),
         }
     }
 
@@ -164,6 +166,16 @@ impl EnvironmentData {
     /// Set task order for a DAG
     pub fn set_task_order(&mut self, dag_id: String, order: Vec<String>) {
         self.task_order.insert(dag_id, order);
+    }
+    
+    /// Get task dependencies for a DAG (task_id -> list of upstream dependencies)
+    pub fn get_task_dependencies(&self, dag_id: &str) -> Option<&HashMap<String, Vec<String>>> {
+        self.task_dependencies.get(dag_id)
+    }
+    
+    /// Set task dependencies for a DAG
+    pub fn set_task_dependencies(&mut self, dag_id: String, dependencies: HashMap<String, Vec<String>>) {
+        self.task_dependencies.insert(dag_id, dependencies);
     }
 }
 
@@ -299,6 +311,19 @@ impl EnvironmentStateContainer {
         self.get_active_environment()
             .and_then(|env| env.get_task_order(dag_id))
             .cloned()
+    }
+    
+    /// Set task dependencies for a DAG in the active environment
+    pub fn set_task_dependencies(&mut self, dag_id: String, dependencies: HashMap<String, Vec<String>>) {
+        if let Some(env) = self.get_active_environment_mut() {
+            env.set_task_dependencies(dag_id, dependencies);
+        }
+    }
+    
+    /// Get task dependencies for a DAG in the active environment
+    pub fn get_task_dependencies(&self, dag_id: &str) -> Option<&HashMap<String, Vec<String>>> {
+        self.get_active_environment()
+            .and_then(|env| env.get_task_dependencies(dag_id))
     }
 }
 

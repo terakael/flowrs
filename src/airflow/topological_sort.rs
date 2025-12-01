@@ -86,46 +86,43 @@ pub fn topological_sort(tasks: Vec<(String, Vec<String>)>) -> Vec<String> {
         groups.sort();
         
         // Process one group completely before moving to the next
-        for group in groups {
-            let mut group_tasks = by_group.get(&group).unwrap().clone();
-            group_tasks.sort();
+        if let Some(group) = groups.first() {
+            // Process this entire group's chain before moving to next group
+            let group = group.clone();
             
-            // Process all tasks from this group that are currently available
-            for task_id in group_tasks {
-                if !available.contains(&task_id) || processed.contains(&task_id) {
-                    continue;
-                }
-                
-                // Process this task
-                sorted.push(task_id.clone());
-                processed.insert(task_id.clone());
-                available.remove(&task_id);
-                
-                // Make downstream tasks available if ready
-                make_downstream_available(&task_id, &downstream_map, &upstream_map, &processed, &mut available);
-                
-                // After processing a task, check if more tasks from THIS group are now available
-                // This keeps us processing the same group
-                let newly_available: Vec<String> = available
+            // Keep processing tasks from this group until no more from this group are available
+            loop {
+                // Find all available tasks from this group
+                let group_tasks: Vec<String> = available
                     .iter()
                     .filter(|t| get_task_group(t) == group)
                     .cloned()
                     .collect();
                 
-                for new_task in newly_available {
-                    if !processed.contains(&new_task) {
-                        sorted.push(new_task.clone());
-                        processed.insert(new_task.clone());
-                        available.remove(&new_task);
+                if group_tasks.is_empty() {
+                    // No more tasks from this group available
+                    break;
+                }
+                
+                // Sort tasks within group alphabetically
+                let mut sorted_group_tasks = group_tasks.clone();
+                sorted_group_tasks.sort();
+                
+                // Process first available task from this group
+                if let Some(task_id) = sorted_group_tasks.first() {
+                    let task_id = task_id.clone();
+                    
+                    if !processed.contains(&task_id) {
+                        // Process this task
+                        sorted.push(task_id.clone());
+                        processed.insert(task_id.clone());
+                        available.remove(&task_id);
                         
-                        // Add its downstream tasks
-                        make_downstream_available(&new_task, &downstream_map, &upstream_map, &processed, &mut available);
+                        // Make downstream tasks available if ready
+                        make_downstream_available(&task_id, &downstream_map, &upstream_map, &processed, &mut available);
                     }
                 }
             }
-            // Break after processing one group to re-evaluate available tasks
-            // This ensures we complete one group before moving to the next
-            break;
         }
     }
     
@@ -273,3 +270,93 @@ mod tests {
         assert_eq!(sorted[4], "group_b.task2");
     }
 }
+
+#[cfg(test)]
+mod test_parallel_chains {
+    use super::*;
+
+    #[test]
+    fn test_two_parallel_chains() {
+        // Two parallel chains:
+        // task1A -> task2A -> task3A
+        // task1B -> task2B -> task3B
+        let tasks = vec![
+            ("task1A".to_string(), vec!["task2A".to_string()]),
+            ("task2A".to_string(), vec!["task3A".to_string()]),
+            ("task3A".to_string(), vec![]),
+            ("task1B".to_string(), vec!["task2B".to_string()]),
+            ("task2B".to_string(), vec!["task3B".to_string()]),
+            ("task3B".to_string(), vec![]),
+        ];
+        
+        let sorted = topological_sort(tasks);
+        println!("\nTwo parallel chains (A and B):");
+        for (idx, task) in sorted.iter().enumerate() {
+            println!("{}: {}", idx, task);
+        }
+        
+        // Both chains should be grouped together
+        // Expected: task1A, task2A, task3A, task1B, task2B, task3B
+        // OR:       task1B, task2B, task3B, task1A, task2A, task3A
+        
+        // Check that each chain is together
+        let pos_1a = sorted.iter().position(|t| t == "task1A").unwrap();
+        let pos_2a = sorted.iter().position(|t| t == "task2A").unwrap();
+        let pos_3a = sorted.iter().position(|t| t == "task3A").unwrap();
+        let pos_1b = sorted.iter().position(|t| t == "task1B").unwrap();
+        let pos_2b = sorted.iter().position(|t| t == "task2B").unwrap();
+        let pos_3b = sorted.iter().position(|t| t == "task3B").unwrap();
+        
+        // Chain A should be sequential
+        assert!(pos_1a < pos_2a, "task1A should come before task2A");
+        assert!(pos_2a < pos_3a, "task2A should come before task3A");
+        
+        // Chain B should be sequential
+        assert!(pos_1b < pos_2b, "task1B should come before task2B");
+        assert!(pos_2b < pos_3b, "task2B should come before task3B");
+        
+        println!("\nPositions:");
+        println!("Chain A: task1A={}, task2A={}, task3A={}", pos_1a, pos_2a, pos_3a);
+        println!("Chain B: task1B={}, task2B={}, task3B={}", pos_1b, pos_2b, pos_3b);
+    }
+}
+
+    #[test]
+    fn test_parallel_task_groups() {
+        // Two parallel task groups (with dots):
+        // groupA.task1 -> groupA.task2 -> groupA.task3
+        // groupB.task1 -> groupB.task2 -> groupB.task3
+        let tasks = vec![
+            ("groupA.task1".to_string(), vec!["groupA.task2".to_string()]),
+            ("groupA.task2".to_string(), vec!["groupA.task3".to_string()]),
+            ("groupA.task3".to_string(), vec![]),
+            ("groupB.task1".to_string(), vec!["groupB.task2".to_string()]),
+            ("groupB.task2".to_string(), vec!["groupB.task3".to_string()]),
+            ("groupB.task3".to_string(), vec![]),
+        ];
+        
+        let sorted = topological_sort(tasks);
+        println!("\nTwo parallel task groups (groupA and groupB):");
+        for (idx, task) in sorted.iter().enumerate() {
+            println!("{}: {}", idx, task);
+        }
+        
+        // Each group should be kept together
+        // Expected: groupA.task1, groupA.task2, groupA.task3, groupB.task1, groupB.task2, groupB.task3
+        let pos_a1 = sorted.iter().position(|t| t == "groupA.task1").unwrap();
+        let pos_a2 = sorted.iter().position(|t| t == "groupA.task2").unwrap();
+        let pos_a3 = sorted.iter().position(|t| t == "groupA.task3").unwrap();
+        let pos_b1 = sorted.iter().position(|t| t == "groupB.task1").unwrap();
+        let pos_b2 = sorted.iter().position(|t| t == "groupB.task2").unwrap();
+        let pos_b3 = sorted.iter().position(|t| t == "groupB.task3").unwrap();
+        
+        println!("\nPositions:");
+        println!("Group A: {} {} {}", pos_a1, pos_a2, pos_a3);
+        println!("Group B: {} {} {}", pos_b1, pos_b2, pos_b3);
+        
+        // Verify groups are kept together
+        assert_eq!(pos_a2, pos_a1 + 1, "groupA tasks should be consecutive");
+        assert_eq!(pos_a3, pos_a2 + 1, "groupA tasks should be consecutive");
+        assert_eq!(pos_b2, pos_b1 + 1, "groupB tasks should be consecutive");
+        assert_eq!(pos_b3, pos_b2 + 1, "groupB tasks should be consecutive");
+    }

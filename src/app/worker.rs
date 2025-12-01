@@ -228,12 +228,31 @@ impl Worker {
                     Ok(tasks) => {
                         debug!("Fetched {} tasks for DAG {}", tasks.len(), dag_id);
                         
+                        // Build upstream dependency map (task_id -> list of tasks it depends on)
+                        let mut dependencies: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+                        
+                        // Initialize all tasks in the map
+                        for (task_id, _) in &tasks {
+                            dependencies.entry(task_id.clone()).or_insert_with(Vec::new);
+                        }
+                        
+                        // Convert downstream relationships to upstream dependencies
+                        for (task_id, downstream_ids) in &tasks {
+                            for downstream_id in downstream_ids {
+                                dependencies
+                                    .entry(downstream_id.clone())
+                                    .or_insert_with(Vec::new)
+                                    .push(task_id.clone());
+                            }
+                        }
+                        
                         // Perform topological sort
                         let sorted_task_ids = crate::airflow::topological_sort::topological_sort(tasks);
                         
-                        // Store the sorted order in environment state
+                        // Store both the sorted order and dependencies in environment state
                         let mut app = self.app.lock().unwrap();
-                        app.environment_state.set_task_order(dag_id, sorted_task_ids);
+                        app.environment_state.set_task_order(dag_id.clone(), sorted_task_ids);
+                        app.environment_state.set_task_dependencies(dag_id, dependencies);
                     }
                     Err(e) => {
                         log::error!("Failed to fetch tasks for {}: {}", dag_id, e);

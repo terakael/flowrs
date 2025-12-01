@@ -126,8 +126,32 @@ impl App {
                         .get_active_task_instances(&dag_id, &dag_run_id);
                     self.task_instances.filter_task_instances();
                     
-                    // Apply topological ordering if available
-                    if let Some(task_order) = self.environment_state.get_task_order(&dag_id) {
+                    // Build graph layout and apply tree-based ordering if dependencies available
+                    let dependencies_opt = self.environment_state.get_task_dependencies(&dag_id).cloned();
+                    if let Some(dependencies) = dependencies_opt {
+                        // Build tree-ordered layout
+                        let tree_ordered = crate::airflow::graph_layout::build_graph_layout_ordered(&dependencies);
+                        
+                        // Extract task order from tree traversal (first occurrence of each task)
+                        let mut tree_order: Vec<String> = Vec::new();
+                        let mut seen = std::collections::HashSet::new();
+                        for (task_id, _) in &tree_ordered {
+                            if seen.insert(task_id.clone()) {
+                                tree_order.push(task_id.clone());
+                            }
+                        }
+                        
+                        // Apply tree ordering
+                        self.apply_task_order(&tree_order);
+                        
+                        // Build graph layout HashMap
+                        let graph_layout = crate::airflow::graph_layout::build_graph_layout(
+                            &tree_order,
+                            &dependencies
+                        );
+                        self.task_instances.graph_layout = graph_layout;
+                    } else if let Some(task_order) = self.environment_state.get_task_order(&dag_id) {
+                        // Fallback to topological ordering if no dependencies
                         self.apply_task_order(&task_order);
                     }
                 } else {
