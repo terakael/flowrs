@@ -161,7 +161,7 @@ impl Widget for &mut ConfigModel {
         let header_row = create_headers(headers);
 
         let header =
-            Row::new(header_row).style(DEFAULT_STYLE.reversed().add_modifier(Modifier::BOLD));
+            Row::new(header_row).style(crate::ui::constants::HEADER_STYLE);
 
         let rows = self.filtered.items.iter().enumerate().map(|(idx, item)| {
             Row::new(vec![

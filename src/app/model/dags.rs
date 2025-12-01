@@ -601,8 +601,7 @@ impl Widget for &mut DagModel {
         let headers = ["State", "Name", "Schedule", "Next Run", "Tags"];
         let header_row = create_headers(headers);
         let header = Row::new(header_row)
-            .style(DEFAULT_STYLE.reversed())
-            .add_modifier(Modifier::BOLD);
+            .style(crate::ui::constants::HEADER_STYLE);
         let search_term = self.filter.prefix.as_deref();
         let rows =
             self.filtered.items.iter().enumerate().map(|(idx, item)| {
