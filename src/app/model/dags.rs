@@ -683,16 +683,13 @@ impl Widget for &mut DagModel {
                 .border_type(BorderType::Rounded)
                 .borders(Borders::ALL)
                 .title({
-                    // Calculate stats for active DAGs only
-                    let active_dags: Vec<_> = self.all.iter().filter(|d| d.is_active.unwrap_or(false)).collect();
-                    let total_dags = active_dags.len();
-                    let paused_dags = active_dags.iter().filter(|d| d.is_paused).count();
-                    let unpaused_dags = total_dags - paused_dags;
+                    // Calculate showing/total counts
+                    let showing_count = self.filtered.items.len();
+                    let total_count = self.all.iter().filter(|d| d.is_active.unwrap_or(false)).count();
                     
-                    let mode = if self.show_paused { "All" } else { "Active Only" };
                     format!(
-                        "DAGs ({}) - {}/{} Unpaused - Press <?> for commands",
-                        mode, unpaused_dags, total_dags
+                        "DAGs (showing {} of {}) - Press <?> for commands",
+                        showing_count, total_count
                     )
                 })
                 .border_style(dags_border_style)
