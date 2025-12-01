@@ -51,6 +51,17 @@ impl AirflowClient for V2Client {
         let result: model::importerror::ImportErrorCollection = response.json().await?;
         Ok(result.total_entries as usize)
     }
+    
+    async fn list_import_errors(&self) -> Result<crate::airflow::model::common::ImportErrorList> {
+        let response = self
+            .base_api(Method::GET, "importErrors")?
+            .send()
+            .await?
+            .error_for_status()?;
+            
+        let result: model::importerror::ImportErrorCollection = response.json().await?;
+        Ok(result.into())
+    }
 
     fn build_open_url(&self, item: &OpenItem) -> Result<String> {
         // Ensure base URL ends with a trailing slash for proper path joining

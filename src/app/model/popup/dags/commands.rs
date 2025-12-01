@@ -14,6 +14,16 @@ pub static DAG_COMMAND_POP_UP: LazyLock<CommandPopUp> = LazyLock::new(|| {
             key_binding: "Shift+P",
             description: "Pause or unpause selected DAG",
         },
+        Command {
+            name: "Focus Import Errors",
+            key_binding: "Shift+K",
+            description: "Switch focus to Import Errors panel",
+        },
+        Command {
+            name: "Focus DAG Table",
+            key_binding: "Shift+J",
+            description: "Switch focus to DAG table",
+        },
     ];
     commands.append(&mut DefaultCommands::new().0);
     CommandPopUp {

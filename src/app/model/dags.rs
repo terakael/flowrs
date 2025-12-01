@@ -8,10 +8,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Row, StatefulWidget, Table, Widget};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget, Table, Widget, Wrap};
 use time::OffsetDateTime;
 
-use crate::airflow::model::common::{Dag, DagRun, DagStatistic};
+use crate::airflow::model::common::{Dag, DagRun, DagStatistic, ImportError};
 use crate::app::events::custom::FlowrsEvent;
 use crate::app::model::popup::dags::commands::DAG_COMMAND_POP_UP;
 use crate::ui::common::create_headers;
@@ -27,6 +27,8 @@ use crate::app::worker::{OpenItem, WorkerMessage};
 pub const RECENT_RUNS_HEALTH_WINDOW: usize = 7;
 /// Width of the state column (for colored square indicator)
 const STATE_COLUMN_WIDTH: u16 = 5;
+/// Height of the import errors panel
+const IMPORT_ERRORS_PANEL_HEIGHT: u16 = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum DagStatus {
@@ -34,6 +36,45 @@ enum DagStatus {
     Running,
     Idle,
     Paused,    // Lowest priority (sort last)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DagFocusedSection {
+    ImportErrors,
+    DagTable,
+}
+
+#[derive(Default)]
+pub struct ImportErrorWidget {
+    pub cached_lines: Option<Vec<Line<'static>>>,
+    pub vertical_scroll: usize,
+    pub vertical_scroll_state: ScrollbarState,
+}
+
+impl ImportErrorWidget {
+    pub fn set_errors(&mut self, errors: &[ImportError]) {
+        let new_lines = format_import_errors(errors);
+        let content_length = new_lines.len();
+        
+        // Only reset scroll position if this is the first time loading
+        if self.cached_lines.is_none() {
+            self.vertical_scroll = 0;
+        } else {
+            // Ensure scroll position doesn't exceed new content length
+            self.vertical_scroll = self.vertical_scroll.min(content_length.saturating_sub(1));
+        }
+        
+        self.cached_lines = Some(new_lines);
+        self.vertical_scroll_state = ScrollbarState::default()
+            .content_length(content_length)
+            .position(self.vertical_scroll);
+    }
+
+    pub fn clear(&mut self) {
+        self.cached_lines = None;
+        self.vertical_scroll = 0;
+        self.vertical_scroll_state = ScrollbarState::default();
+    }
 }
 
 pub struct DagModel {
@@ -44,6 +85,9 @@ pub struct DagModel {
     pub filter: Filter,
     pub show_paused: bool,
     pub import_error_count: usize,
+    pub import_errors: ImportErrorWidget,
+    pub import_error_list: Vec<ImportError>,
+    pub focused_section: DagFocusedSection,
     commands: Option<&'static CommandPopUp<'static>>,
     pub error_popup: Option<ErrorPopup>,
     ticks: u32,
@@ -60,6 +104,9 @@ impl DagModel {
             filter: Filter::new(),
             show_paused: false,
             import_error_count: 0,
+            import_errors: ImportErrorWidget::default(),
+            import_error_list: vec![],
+            focused_section: DagFocusedSection::DagTable,
             ticks: 0,
             commands: None,
             error_popup: None,
@@ -270,6 +317,8 @@ impl Model for DagModel {
                 if !self.ticks.is_multiple_of(10) {
                     return (Some(FlowrsEvent::Tick), vec![]);
                 }
+                
+                // UpdateImportErrors now fetches both count and full error list
                 (
                     Some(FlowrsEvent::Tick),
                     vec![
@@ -321,10 +370,44 @@ impl Model for DagModel {
                 } else {
                     match key_event.code {
                         KeyCode::Down | KeyCode::Char('j') => {
-                            self.filtered.next();
+                            // Handle scrolling based on focused section
+                            match self.focused_section {
+                                DagFocusedSection::ImportErrors => {
+                                    if let Some(cached_lines) = &self.import_errors.cached_lines {
+                                        if self.import_errors.vertical_scroll < cached_lines.len().saturating_sub(1) {
+                                            self.import_errors.vertical_scroll += 1;
+                                            self.import_errors.vertical_scroll_state = self.import_errors.vertical_scroll_state.position(self.import_errors.vertical_scroll);
+                                        }
+                                    }
+                                }
+                                DagFocusedSection::DagTable => {
+                                    self.filtered.next();
+                                }
+                            }
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
-                            self.filtered.previous();
+                            // Handle scrolling based on focused section
+                            match self.focused_section {
+                                DagFocusedSection::ImportErrors => {
+                                    if self.import_errors.vertical_scroll > 0 {
+                                        self.import_errors.vertical_scroll -= 1;
+                                        self.import_errors.vertical_scroll_state = self.import_errors.vertical_scroll_state.position(self.import_errors.vertical_scroll);
+                                    }
+                                }
+                                DagFocusedSection::DagTable => {
+                                    self.filtered.previous();
+                                }
+                            }
+                        }
+                        KeyCode::Char('J') => {
+                            // Switch focus to DAG table (down)
+                            self.focused_section = DagFocusedSection::DagTable;
+                        }
+                        KeyCode::Char('K') => {
+                            // Switch focus to ImportErrors panel (up)
+                            if self.import_errors.cached_lines.is_some() {
+                                self.focused_section = DagFocusedSection::ImportErrors;
+                            }
                         }
                         KeyCode::Char('G') => {
                             self.filtered.state.select_last();
@@ -431,22 +514,67 @@ impl Model for DagModel {
 
 impl Widget for &mut DagModel {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let rects = if self.filter.is_enabled() {
+        // Handle filter at bottom if enabled
+        let base_area = if self.filter.is_enabled() {
             let rects = Layout::default()
                 .constraints([Constraint::Fill(90), Constraint::Max(3)].as_ref())
                 .margin(0)
                 .split(area);
 
             self.filter.render(rects[1], buf);
-
-            rects
+            rects[0]
         } else {
-            Layout::default()
-                .constraints([Constraint::Percentage(100)].as_ref())
-                .margin(0)
-                .split(area)
+            area
         };
+
+        // Split into ImportErrors section and DAG table if errors exist
+        let (errors_area, dags_area) = if self.import_errors.cached_lines.is_some() {
+            let rects = Layout::default()
+                .constraints([Constraint::Length(IMPORT_ERRORS_PANEL_HEIGHT), Constraint::Min(0)].as_ref())
+                .split(base_area);
+            (Some(rects[0]), rects[1])
+        } else {
+            (None, base_area)
+        };
+
+        // Render ImportErrors section if available
+        if let (Some(errors_area), Some(cached_lines)) = (errors_area, &self.import_errors.cached_lines) {
+            let border_style = if self.focused_section == DagFocusedSection::ImportErrors {
+                DEFAULT_STYLE.fg(Color::Cyan) // Highlight when focused
+            } else {
+                DEFAULT_STYLE.fg(crate::ui::constants::RED) // Red border when not focused
+            };
+
+            let errors_block = Block::default()
+                .border_type(BorderType::Rounded)
+                .borders(Borders::ALL)
+                .title(format!("Import Errors ({})", self.import_error_count))
+                .border_style(border_style)
+                .style(DEFAULT_STYLE)
+                .title_style(DEFAULT_STYLE.fg(crate::ui::constants::RED).add_modifier(Modifier::BOLD));
+
+            let errors_text = Paragraph::new(cached_lines.clone())
+                .block(errors_block)
+                .style(DEFAULT_STYLE)
+                .wrap(Wrap { trim: false })
+                .scroll((self.import_errors.vertical_scroll as u16, 0));
+
+            errors_text.render(errors_area, buf);
+
+            // Render scrollbar for errors section
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓"));
+            let mut scrollbar_state = self.import_errors.vertical_scroll_state.clone();
+            scrollbar.render(errors_area, buf, &mut scrollbar_state);
+        }
+
         let selected_style = crate::ui::constants::SELECTED_STYLE;
+        let dags_border_style = if self.focused_section == DagFocusedSection::DagTable {
+            DEFAULT_STYLE.fg(Color::Cyan) // Highlight when focused
+        } else {
+            DEFAULT_STYLE
+        };
 
         let headers = ["State", "Name", "Schedule", "Next Run", "Tags"];
         let header_row = create_headers(headers);
@@ -541,16 +669,16 @@ impl Widget for &mut DagModel {
                     
                     let mode = if self.show_paused { "All" } else { "Active Only" };
                     format!(
-                        "DAGs ({}) - {}/{} Unpaused, {} Import Errors - Press <?> for commands",
-                        mode, unpaused_dags, total_dags, self.import_error_count
+                        "DAGs ({}) - {}/{} Unpaused - Press <?> for commands",
+                        mode, unpaused_dags, total_dags
                     )
                 })
-                .border_style(DEFAULT_STYLE)
+                .border_style(dags_border_style)
                 .style(DEFAULT_STYLE),
         )
         .row_highlight_style(selected_style);
 
-        StatefulWidget::render(t, rects[0], buf, &mut self.filtered.state);
+        StatefulWidget::render(t, dags_area, buf, &mut self.filtered.state);
 
         if let Some(commands) = &self.commands {
             commands.render(area, buf);
@@ -588,6 +716,68 @@ fn convert_datetimeoffset_to_human_readable_remaining_time(dt: OffsetDateTime) -
         3600..=86_399 => format!("{hours}h {minutes:02}m"),
         _ => format!("{days}d {hours:02}h {minutes:02}m"),
     }
+}
+
+/// Format import errors for display in the ImportErrors panel
+fn format_import_errors(errors: &[ImportError]) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    
+    if errors.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No import errors",
+            Style::default().fg(Color::DarkGray),
+        )));
+        return lines;
+    }
+    
+    for (i, error) in errors.iter().enumerate() {
+        // Error header with filename
+        let filename = error.filename.as_deref().unwrap_or("Unknown file");
+        lines.push(Line::from(Span::styled(
+            format!("═══ Error {} of {} ═══", i + 1, errors.len()),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )));
+        
+        lines.push(Line::from(vec![
+            Span::styled("File: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(filename.to_string()),
+        ]));
+        
+        // Timestamp
+        if let Some(ts) = &error.timestamp {
+            lines.push(Line::from(vec![
+                Span::styled("Time: ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(ts.to_string()),
+            ]));
+        }
+        
+        lines.push(Line::from("")); // Separator
+        
+        // Stack trace
+        lines.push(Line::from(Span::styled(
+            "Stack Trace:",
+            Style::default().add_modifier(Modifier::BOLD).add_modifier(Modifier::UNDERLINED),
+        )));
+        
+        if let Some(stack) = &error.stack_trace {
+            for line in stack.lines() {
+                lines.push(Line::from(line.to_string()));
+            }
+        } else {
+            lines.push(Line::from(Span::styled(
+                "No stack trace available",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        
+        // Add spacing between errors
+        if i < errors.len() - 1 {
+            lines.push(Line::from(""));
+            lines.push(Line::from(""));
+        }
+    }
+    
+    lines
 }
 
 #[cfg(test)]

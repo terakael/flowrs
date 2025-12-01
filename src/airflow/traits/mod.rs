@@ -13,6 +13,7 @@ pub use task::TaskOperations;
 pub use taskinstance::TaskInstanceOperations;
 
 use crate::airflow::config::AirflowVersion;
+use crate::airflow::model::common::ImportErrorList;
 use crate::app::worker::OpenItem;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -35,4 +36,7 @@ pub trait AirflowClient:
     
     /// Get the count of import errors
     async fn get_import_error_count(&self) -> Result<usize>;
+    
+    /// Get the full list of import errors
+    async fn list_import_errors(&self) -> Result<ImportErrorList>;
 }

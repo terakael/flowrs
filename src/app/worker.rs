@@ -520,10 +520,31 @@ impl Worker {
                 }
             }
             WorkerMessage::UpdateImportErrors => {
-                let import_error_count = client.get_import_error_count().await.unwrap_or(0);
+                // Fetch full import error list (includes count via total_entries)
+                let errors = client.list_import_errors().await;
                 let mut app = self.app.lock().unwrap();
-                app.dags.import_error_count = import_error_count;
+                match errors {
+                    Ok(error_list) => {
+                        let count = error_list.total_entries as usize;
+                        debug!("Fetched {} import errors", count);
+                        
+                        // Update count
+                        app.dags.import_error_count = count;
+                        
+                        // Update error list and widget
+                        app.dags.import_error_list = error_list.import_errors.clone();
+                        app.dags.import_errors.set_errors(&error_list.import_errors);
+                    }
+                    Err(e) => {
+                        log::debug!("Failed to fetch import errors: {}", e);
+                        // Clear everything on failure
+                        app.dags.import_error_count = 0;
+                        app.dags.import_error_list = vec![];
+                        app.dags.import_errors.clear();
+                    }
+                }
             }
+
             WorkerMessage::OpenItem(item) => {
                 // For Config items, look up the endpoint from active_server instead of using the passed string
                 let final_item = if let OpenItem::Config(_) = &item {
