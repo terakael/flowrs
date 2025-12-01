@@ -6,7 +6,7 @@ use strum::IntoEnumIterator;
 use super::model::UpdateCommand;
 use crate::{
     airflow::config::{AirflowAuth, AirflowConfig, BasicAuth, FlowrsConfig, TokenCmd},
-    commands::config::model::{validate_endpoint, ConfigOption},
+    commands::config::model::{prompt_proxy_config, validate_endpoint, ConfigOption},
 };
 
 use anyhow::Result;
@@ -46,11 +46,15 @@ impl UpdateCommand {
             .with_validator(validate_endpoint)
             .prompt()?;
 
+        // Proxy configuration
+        let proxy = prompt_proxy_config(airflow_config.proxy.as_deref())?;
+
         let auth_type =
             Select::new("authentication type", ConfigOption::iter().collect()).prompt()?;
 
         airflow_config.name = name;
         airflow_config.endpoint = endpoint;
+        airflow_config.proxy = proxy;
         match auth_type {
             ConfigOption::BasicAuth => {
                 println!("\n📝 Enter environment variable names for credentials.");

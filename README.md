@@ -49,3 +49,53 @@ If you're self-hosting an Airflow instance, or your favorite managed service is 
 This creates an entry in a `~/.flowrs` configuration file. If you have multiple Airflow servers configured, you can easily switch between them in `flowrs` configuration screen.
 
 Only basic authentication and bearer token authentication are supported. When selecting the bearer token option, you can either provide a static token or a command that generates a token.
+
+### Proxy Configuration
+
+If your Airflow instance is behind a proxy, `flowrs` supports proxy configuration in multiple ways:
+
+#### Per-Server Proxy Configuration
+
+You can configure a proxy for each Airflow server in your `~/.flowrs` configuration file:
+
+```toml
+[[servers]]
+name = "my-server"
+endpoint = "http://airflow.internal:8080"
+proxy = "http://proxy.company.com:8080"
+version = "V2"
+
+[servers.auth.Basic]
+username = "${AIRFLOW_USERNAME}"
+password = "${AIRFLOW_PASSWORD}"
+```
+
+The proxy URL supports environment variable expansion using `${VAR}` syntax:
+
+```toml
+proxy = "${PROXY_URL}"
+```
+
+#### Environment Variables
+
+`flowrs` automatically respects standard HTTP proxy environment variables if no per-server proxy is configured:
+
+- `HTTP_PROXY` or `http_proxy`: Proxy for HTTP requests
+- `HTTPS_PROXY` or `https_proxy`: Proxy for HTTPS requests
+- `NO_PROXY` or `no_proxy`: Comma-separated list of hosts to exclude from proxying
+
+Example:
+
+```bash
+export HTTP_PROXY=http://proxy.company.com:8080
+export HTTPS_PROXY=http://proxy.company.com:8080
+flowrs run
+```
+
+**Priority**: Per-server proxy configuration takes precedence over environment variables.
+
+**Proxy Authentication**: Proxies requiring authentication can be configured using the standard URL format:
+
+```toml
+proxy = "http://username:password@proxy.company.com:8080"
+```

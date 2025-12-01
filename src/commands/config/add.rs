@@ -8,7 +8,7 @@ use crate::{
     airflow::config::{
         AirflowAuth, AirflowConfig, AirflowVersion, BasicAuth, FlowrsConfig, TokenCmd,
     },
-    commands::config::model::{validate_endpoint, ConfigOption},
+    commands::config::model::{prompt_proxy_config, validate_endpoint, ConfigOption},
 };
 use anyhow::Result;
 
@@ -18,6 +18,9 @@ impl AddCommand {
         let endpoint = inquire::Text::new("endpoint")
             .with_validator(validate_endpoint)
             .prompt()?;
+
+        // Optional proxy configuration
+        let proxy = prompt_proxy_config(None)?;
 
         let version_str = inquire::Select::new("Airflow version", vec!["v2", "v3"])
             .with_help_message("Select the Airflow API version")
@@ -53,6 +56,7 @@ impl AddCommand {
                     }),
                     managed: None,
                     version,
+                    proxy,
                 }
             }
             ConfigOption::Token(_) => {
@@ -87,6 +91,7 @@ impl AddCommand {
                     auth: AirflowAuth::Token(TokenCmd { cmd, token }),
                     managed: None,
                     version,
+                    proxy,
                 }
             }
         };

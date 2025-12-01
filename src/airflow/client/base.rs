@@ -17,10 +17,34 @@ pub struct BaseClient {
 
 impl BaseClient {
     pub fn new(config: AirflowConfig) -> Result<Self> {
-        let client = reqwest::Client::builder()
+        let mut client_builder = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
-            .use_rustls_tls()
-            .build()?;
+            .use_rustls_tls();
+        
+        // Configure proxy if specified in config (takes priority)
+        if let Some(proxy_url) = &config.proxy {
+            let proxy_url = crate::airflow::config::expand_env_vars(proxy_url)?;
+            let proxy = reqwest::Proxy::all(&proxy_url)
+                .with_context(|| format!("Invalid proxy URL: {}", proxy_url))?;
+            client_builder = client_builder.proxy(proxy);
+            info!("🔀 Using proxy from config: {}", proxy_url);
+        } else {
+            // Fall back to standard environment variables if no config proxy
+            if let Ok(http_proxy) = std::env::var("HTTP_PROXY").or_else(|_| std::env::var("http_proxy")) {
+                let proxy = reqwest::Proxy::http(&http_proxy)
+                    .with_context(|| format!("Invalid HTTP_PROXY: {}", http_proxy))?;
+                client_builder = client_builder.proxy(proxy);
+                info!("🔀 Using proxy from HTTP_PROXY: {}", http_proxy);
+            }
+            if let Ok(https_proxy) = std::env::var("HTTPS_PROXY").or_else(|_| std::env::var("https_proxy")) {
+                let proxy = reqwest::Proxy::https(&https_proxy)
+                    .with_context(|| format!("Invalid HTTPS_PROXY: {}", https_proxy))?;
+                client_builder = client_builder.proxy(proxy);
+                info!("🔀 Using proxy from HTTPS_PROXY: {}", https_proxy);
+            }
+        }
+        
+        let client = client_builder.build()?;
         Ok(Self { client, config })
     }
 

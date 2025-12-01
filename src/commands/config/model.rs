@@ -91,3 +91,30 @@ pub fn validate_endpoint(
         Err(error) => Ok(Validation::Invalid(error.into())),
     }
 }
+
+/// Prompts the user for proxy configuration.
+/// 
+/// # Arguments
+/// * `default_proxy` - Optional default proxy URL to pre-fill in the prompt
+/// 
+/// # Returns
+/// * `Ok(Some(String))` - User wants to configure a proxy and provided a URL
+/// * `Ok(None)` - User chose not to configure a proxy
+/// * `Err` - An error occurred during prompting
+pub fn prompt_proxy_config(default_proxy: Option<&str>) -> Result<Option<String>> {
+    let use_proxy = inquire::Confirm::new("Configure a proxy?")
+        .with_default(default_proxy.is_some())
+        .prompt()?;
+    
+    if use_proxy {
+        let default = default_proxy.unwrap_or("");
+        let proxy_url = inquire::Text::new("proxy URL")
+            .with_default(default)
+            .with_placeholder("http://proxy.example.com:8080")
+            .with_help_message("Supports environment variables like ${PROXY_URL}")
+            .prompt()?;
+        Ok(Some(proxy_url))
+    } else {
+        Ok(None)
+    }
+}

@@ -74,6 +74,7 @@ pub struct AirflowConfig {
     pub managed: Option<ManagedService>,
     #[serde(default)]
     pub version: AirflowVersion,
+    pub proxy: Option<String>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -314,6 +315,7 @@ password = "airflow"
                 }),
                 managed: None,
                 version: AirflowVersion::V2,
+                proxy: None,
             }]),
             managed_services: Some(vec![ManagedService::Conveyor]),
             active_server: None,
@@ -341,5 +343,119 @@ password = "airflow"
 
         let config = config.unwrap();
         assert_eq!(config.path.unwrap(), CONFIG_FILE.as_path().to_path_buf());
+    }
+
+    const TEST_CONFIG_WITH_PROXY: &str = r#"[[servers]]
+name = "test-proxy"
+endpoint = "http://localhost:8080"
+proxy = "http://proxy.example.com:8080"
+
+[servers.auth.Basic]
+username = "airflow"
+password = "airflow"
+"#;
+
+    #[test]
+    fn test_config_with_proxy() {
+        let result = FlowrsConfig::from_str(TEST_CONFIG_WITH_PROXY).unwrap();
+        let servers = result.servers.unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "test-proxy");
+        assert_eq!(servers[0].proxy, Some("http://proxy.example.com:8080".to_string()));
+    }
+
+    #[test]
+    fn test_config_with_proxy_env_var() {
+        let config_str = r#"[[servers]]
+name = "test-proxy-env"
+endpoint = "http://localhost:8080"
+proxy = "${PROXY_URL}"
+
+[servers.auth.Basic]
+username = "airflow"
+password = "airflow"
+"#;
+        let result = FlowrsConfig::from_str(config_str).unwrap();
+        let servers = result.servers.unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].proxy, Some("${PROXY_URL}".to_string()));
+    }
+
+    #[test]
+    fn test_serialize_config_with_proxy() {
+        let config = FlowrsConfig {
+            servers: Some(vec![AirflowConfig {
+                name: "test-proxy".to_string(),
+                endpoint: "http://localhost:8080".to_string(),
+                auth: AirflowAuth::Basic(BasicAuth {
+                    username: "airflow".to_string(),
+                    password: "airflow".to_string(),
+                }),
+                managed: None,
+                version: AirflowVersion::V2,
+                proxy: Some("http://proxy.example.com:8080".to_string()),
+            }]),
+            managed_services: None,
+            active_server: None,
+            path: None,
+        };
+
+        let serialized = config.to_str().unwrap();
+        assert!(serialized.contains("proxy = \"http://proxy.example.com:8080\""));
+    }
+
+    #[test]
+    fn test_config_without_proxy() {
+        let result = FlowrsConfig::from_str(TEST_CONFIG).unwrap();
+        let servers = result.servers.unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].proxy, None);
+    }
+
+    #[test]
+    fn test_multiple_servers_different_auth() {
+        let config_str = r#"
+[[servers]]
+name = "server-one"
+endpoint = "http://airflow1.example.com:8080"
+version = "V2"
+
+[servers.auth.Basic]
+username = "user1"
+password = "${PASSWORD_1}"
+
+[[servers]]
+name = "server-two"
+endpoint = "http://airflow2.example.com:8080"
+version = "V3"
+
+[servers.auth.Basic]
+username = "user2"
+password = "${PASSWORD_2}"
+"#;
+
+        let config = FlowrsConfig::from_str(config_str).unwrap();
+        let servers = config.servers.unwrap();
+        
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].name, "server-one");
+        assert_eq!(servers[1].name, "server-two");
+        
+        // Check that each has different auth
+        match &servers[0].auth {
+            AirflowAuth::Basic(auth) => {
+                assert_eq!(auth.username, "user1");
+                assert_eq!(auth.password, "${PASSWORD_1}");
+            },
+            _ => panic!("Expected Basic auth for server-one"),
+        }
+        
+        match &servers[1].auth {
+            AirflowAuth::Basic(auth) => {
+                assert_eq!(auth.username, "user2");
+                assert_eq!(auth.password, "${PASSWORD_2}");
+            },
+            _ => panic!("Expected Basic auth for server-two"),
+        }
     }
 }
