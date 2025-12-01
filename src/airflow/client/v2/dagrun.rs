@@ -11,9 +11,17 @@ use super::V2Client;
 #[async_trait]
 impl DagRunOperations for V2Client {
     async fn list_dagruns(&self, dag_id: &str) -> Result<DagRunList> {
+        self.list_dagruns_paginated(dag_id, 0, 40).await
+    }
+
+    async fn list_dagruns_paginated(&self, dag_id: &str, offset: i64, limit: i64) -> Result<DagRunList> {
         let response: Response = self
             .base_api(Method::GET, &format!("dags/{dag_id}/dagRuns"))?
-            .query(&[("order_by", "-start_date"), ("limit", "50")])
+            .query(&[
+                ("order_by", "-start_date"),
+                ("offset", &offset.to_string()),
+                ("limit", &limit.to_string())
+            ])
             .send()
             .await?
             .error_for_status()?;

@@ -104,6 +104,7 @@ impl App {
             Panel::DAGRun => {
                 if let Some(dag_id) = &self.dagruns.dag_id.clone() {
                     self.dagruns.all = self.environment_state.get_active_dag_runs(dag_id);
+                    self.dagruns.total_entries = self.environment_state.get_active_dag_runs_total(dag_id);
                     self.dagruns.filter_dag_runs();
                     
                     // Sync cached DAG details
@@ -113,6 +114,7 @@ impl App {
                     }
                 } else {
                     self.dagruns.all.clear();
+                    self.dagruns.total_entries = 0;
                 }
             }
             Panel::TaskInstance => {

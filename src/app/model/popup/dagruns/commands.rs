@@ -39,6 +39,16 @@ pub static DAGRUN_COMMAND_POP_UP: LazyLock<CommandPopUp> = LazyLock::new(|| {
             key_binding: "Shift+J",
             description: "Focus DAGRuns table (down)",
         },
+        Command {
+            name: "Next Page",
+            key_binding: "]]",
+            description: "Navigate to next page",
+        },
+        Command {
+            name: "Previous Page",
+            key_binding: "[[",
+            description: "Navigate to previous page",
+        },
     ];
     commands.append(&mut DefaultCommands::new().0);
     CommandPopUp {

@@ -9,6 +9,9 @@ pub trait DagRunOperations: Send + Sync {
     /// List DAG runs for a specific DAG
     async fn list_dagruns(&self, dag_id: &str) -> Result<DagRunList>;
 
+    /// List DAG runs for a specific DAG with pagination
+    async fn list_dagruns_paginated(&self, dag_id: &str, offset: i64, limit: i64) -> Result<DagRunList>;
+
     /// List all DAG runs across all DAGs
     #[allow(unused)]
     async fn list_all_dagruns(&self) -> Result<DagRunList>;

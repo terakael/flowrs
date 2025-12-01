@@ -104,6 +104,9 @@ pub struct DagRunModel {
     pub popup: Option<DagRunPopUp>,
     pub commands: Option<&'static CommandPopUp<'static>>,
     pub error_popup: Option<ErrorPopup>,
+    pub current_page: usize,
+    pub page_size: usize,
+    pub total_entries: i64,  // Total DAG runs available from API
     ticks: u32,
     event_buffer: Vec<FlowrsEvent>,
 }
@@ -123,12 +126,19 @@ impl DagRunModel {
             popup: None,
             commands: None,
             error_popup: None,
+            current_page: 0,
+            page_size: 20,
+            total_entries: 0,
             ticks: 0,
             event_buffer: vec![],
         }
     }
 
     pub fn filter_dag_runs(&mut self) {
+        self.filter_dag_runs_with_reset(false);
+    }
+
+    pub fn filter_dag_runs_with_reset(&mut self, reset_page: bool) {
         let prefix = &self.filter.prefix;
         let mut filtered_dag_runs = match prefix {
             Some(prefix) => self
@@ -142,13 +152,27 @@ impl DagRunModel {
         // Sort by start_date in descending order (most recent first)
         filtered_dag_runs.sort_by(|a, b| b.start_date.cmp(&a.start_date));
         self.filtered.items = filtered_dag_runs;
+        
+        if reset_page {
+            // Reset to first page when filter changes
+            self.current_page = 0;
+        } else {
+            // Ensure current page is still valid after data refresh
+            let total_pages = self.total_pages();
+            if self.current_page >= total_pages && total_pages > 0 {
+                self.current_page = total_pages - 1;
+            }
+        }
     }
 
     pub fn current(&self) -> Option<&DagRun> {
         self.filtered
             .state
             .selected()
-            .map(|i| &self.filtered.items[i])
+            .and_then(|i| {
+                let page_offset = self.current_page * self.page_size;
+                self.filtered.items.get(page_offset + i)
+            })
     }
 
     pub fn mark_dag_run(&mut self, dag_run_id: &str, status: &str) {
@@ -162,6 +186,51 @@ impl DagRunModel {
     pub fn init_info_scroll(&mut self) {
         if let Some(dag) = &self.dag_details {
             self.dag_info.set_info(dag);
+        }
+    }
+
+    /// Get the total number of pages based on total entries from API
+    pub fn total_pages(&self) -> usize {
+        if self.total_entries == 0 {
+            1
+        } else {
+            ((self.total_entries as usize) + self.page_size - 1) / self.page_size
+        }
+    }
+
+    /// Get the paginated slice of filtered items for the current page
+    pub fn paginated_items(&self) -> &[DagRun] {
+        let start = self.current_page * self.page_size;
+        let end = (start + self.page_size).min(self.filtered.items.len());
+        &self.filtered.items[start..end]
+    }
+
+    /// Navigate to the next page
+    pub fn next_page(&mut self) {
+        if self.current_page + 1 < self.total_pages() {
+            self.current_page += 1;
+            // Reset selection to first item on new page
+            self.filtered.state.select(Some(0));
+        }
+    }
+
+    /// Navigate to the previous page
+    pub fn previous_page(&mut self) {
+        if self.current_page > 0 {
+            self.current_page -= 1;
+            // Reset selection to first item on new page
+            self.filtered.state.select(Some(0));
+        }
+    }
+
+    /// Get the range of items being displayed (e.g., "1-20")
+    pub fn current_range(&self) -> (usize, usize) {
+        if self.filtered.items.is_empty() {
+            (0, 0)
+        } else {
+            let start = self.current_page * self.page_size + 1;
+            let end = ((self.current_page + 1) * self.page_size).min(self.filtered.items.len());
+            (start, end)
         }
     }
 }
@@ -193,7 +262,7 @@ impl Model for DagRunModel {
             FlowrsEvent::Key(key_event) => {
                 if self.filter.is_enabled() {
                     self.filter.update(key_event);
-                    self.filter_dag_runs();
+                    self.filter_dag_runs_with_reset(true);
                     return (None, vec![]);
                 } else if let Some(_error_popup) = &mut self.error_popup {
                     match key_event.code {
@@ -355,6 +424,52 @@ impl Model for DagRunModel {
                                 self.event_buffer.push(FlowrsEvent::Key(*key_event));
                             }
                         }
+                        KeyCode::Char('[') => {
+                            if let Some(FlowrsEvent::Key(key_event)) = self.event_buffer.pop() {
+                                if key_event.code == KeyCode::Char('[') {
+                                    // Previous page
+                                    self.previous_page();
+                                } else {
+                                    self.event_buffer.push(FlowrsEvent::Key(key_event));
+                                }
+                            } else {
+                                self.event_buffer.push(FlowrsEvent::Key(*key_event));
+                            }
+                        }
+                        KeyCode::Char(']') => {
+                            if let Some(FlowrsEvent::Key(key_event)) = self.event_buffer.pop() {
+                                if key_event.code == KeyCode::Char(']') {
+                                    // Check if we need to fetch more data (look ahead to next page)
+                                    let next_page_start = (self.current_page + 1) * self.page_size;
+                                    let next_page_end = next_page_start + self.page_size;
+                                    let needs_fetch = next_page_end > self.filtered.items.len() 
+                                        && (self.filtered.items.len() as i64) < self.total_entries;
+                                    
+                                    // Always page forward if possible
+                                    self.next_page();
+                                    
+                                    // Fetch more data in background for future pages
+                                    if needs_fetch {
+                                        if let Some(dag_id) = &self.dag_id {
+                                            let offset = self.all.len() as i64;
+                                            let limit = 40; // Fetch 2 pages ahead for smoother UX
+                                            return (
+                                                None,
+                                                vec![WorkerMessage::FetchMoreDagRuns {
+                                                    dag_id: dag_id.clone(),
+                                                    offset,
+                                                    limit,
+                                                }],
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    self.event_buffer.push(FlowrsEvent::Key(key_event));
+                                }
+                            } else {
+                                self.event_buffer.push(FlowrsEvent::Key(*key_event));
+                            }
+                        }
                         KeyCode::Char('t') => {
                             self.popup = Some(DagRunPopUp::Trigger(TriggerDagRunPopUp::new(
                                 self.dag_id.clone().unwrap(),
@@ -362,7 +477,8 @@ impl Model for DagRunModel {
                         }
                         KeyCode::Char('m') => {
                             if let Some(index) = self.filtered.state.selected() {
-                                self.marked.push(index);
+                                let actual_idx = self.current_page * self.page_size + index;
+                                self.marked.push(actual_idx);
 
                                 self.popup = Some(DagRunPopUp::Mark(MarkDagRunPopup::new(
                                     self.marked
@@ -375,10 +491,11 @@ impl Model for DagRunModel {
                         }
                         KeyCode::Char('M') => {
                             if let Some(index) = self.filtered.state.selected() {
-                                if self.marked.contains(&index) {
-                                    self.marked.retain(|&i| i != index);
+                                let actual_idx = self.current_page * self.page_size + index;
+                                if self.marked.contains(&actual_idx) {
+                                    self.marked.retain(|&i| i != actual_idx);
                                 } else {
-                                    self.marked.push(index);
+                                    self.marked.push(actual_idx);
                                 }
                             }
                         }
@@ -387,7 +504,7 @@ impl Model for DagRunModel {
                         }
                         KeyCode::Char('/') => {
                             self.filter.toggle();
-                            self.filter_dag_runs();
+                            self.filter_dag_runs_with_reset(true);
                         }
                         KeyCode::Char('v') => {
                             if let Some(dag_id) = &self.dag_id {
@@ -502,12 +619,15 @@ impl Widget for &mut DagRunModel {
             DEFAULT_STYLE
         };
 
-        let headers = ["State", "DAG Run ID", "Logical Date", "Type"];
+        let headers = ["State", "DAG Run ID", "Logical Date", "Duration"];
         let header_row = create_headers(headers);
         let header =
-            Row::new(header_row).style(DEFAULT_STYLE.reversed().add_modifier(Modifier::BOLD));
+            Row::new(header_row).style(crate::ui::constants::HEADER_STYLE);
 
-        let rows = self.filtered.items.iter().enumerate().map(|(idx, item)| {
+        let page_offset = self.current_page * self.page_size;
+        let page_end = (page_offset + self.page_size).min(self.filtered.items.len());
+        let rows = self.filtered.items[page_offset..page_end].iter().enumerate().map(|(idx, item)| {
+            let actual_idx = page_offset + idx;
             Row::new(vec![
                 Line::from(match item.state.as_str() {
                     "success" => {
@@ -535,9 +655,9 @@ impl Widget for &mut DagRunModel {
                 } else {
                     "None".to_string()
                 }),
-                Line::from(item.run_type.as_str()),
+                Line::from(format_duration(item.start_date, item.end_date)),
             ])
-            .style(if self.marked.contains(&idx) {
+            .style(if self.marked.contains(&actual_idx) {
                 DEFAULT_STYLE.bg(MARKED_COLOR)
             } else if (idx % 2) == 0 {
                 DEFAULT_STYLE
@@ -548,10 +668,10 @@ impl Widget for &mut DagRunModel {
         let t = Table::new(
             rows,
             &[
-                Constraint::Length(6),
+                Constraint::Length(8),
+                Constraint::Length(40),
+                Constraint::Length(22),
                 Constraint::Fill(1),
-                Constraint::Length(20),
-                Constraint::Length(11),
             ],
         )
         .header(header)
@@ -559,7 +679,11 @@ impl Widget for &mut DagRunModel {
             Block::default()
                 .border_type(BorderType::Rounded)
                 .borders(Borders::ALL)
-                .title("DAGRuns")
+                .title({
+                    let (start, end) = self.current_range();
+                    let total = self.total_entries;
+                    format!("DAGRuns (showing {}-{} of {})", start, end, total)
+                })
                 .border_style(dagruns_border_style)
                 .style(DEFAULT_STYLE),
         )
@@ -677,11 +801,12 @@ fn format_dag_info(dag: &crate::airflow::model::common::Dag) -> Vec<Line<'static
 fn code_to_lines(dag_code: &str) -> Vec<Line<'static>> {
     let ps = SyntaxSet::load_defaults_newlines();
     let ts = ThemeSet::load_defaults();
+
     let syntax = ps.find_syntax_by_extension("py").unwrap();
     let mut h = HighlightLines::new(syntax, &ts.themes["base16-ocean.dark"]);
+
     let mut lines: Vec<Line<'static>> = vec![];
     for line in LinesWithEndings::from(dag_code) {
-        // LinesWithEndings enables use of newlines mode
         let line_spans: Vec<Span<'static>> = h
             .highlight_line(line, &ps)
             .unwrap()
@@ -695,4 +820,32 @@ fn code_to_lines(dag_code: &str) -> Vec<Line<'static>> {
         lines.push(Line::from(line_spans));
     }
     lines
+}
+
+/// Format duration between start and end dates
+fn format_duration(start_date: Option<time::OffsetDateTime>, end_date: Option<time::OffsetDateTime>) -> String {
+    match (start_date, end_date) {
+        (Some(start), Some(end)) => {
+            let duration = end - start;
+            let total_seconds = duration.whole_seconds();
+            
+            if total_seconds < 0 {
+                return "Running".to_string();
+            }
+            
+            let hours = total_seconds / 3600;
+            let minutes = (total_seconds % 3600) / 60;
+            let seconds = total_seconds % 60;
+            
+            if hours > 0 {
+                format!("{}h {}m {}s", hours, minutes, seconds)
+            } else if minutes > 0 {
+                format!("{}m {}s", minutes, seconds)
+            } else {
+                format!("{}s", seconds)
+            }
+        }
+        (Some(_), None) => "Running".to_string(),
+        _ => "-".to_string(),
+    }
 }

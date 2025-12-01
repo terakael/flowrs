@@ -52,6 +52,7 @@ impl DagRunData {
 pub struct DagData {
     pub dag: Dag,
     pub dag_runs: HashMap<DagRunId, DagRunData>,
+    pub total_dag_runs: i64,  // Total DAG runs available from API
 }
 
 impl DagData {
@@ -59,6 +60,7 @@ impl DagData {
         Self {
             dag,
             dag_runs: HashMap::new(),
+            total_dag_runs: 0,
         }
     }
 
@@ -115,6 +117,13 @@ impl EnvironmentData {
                     .dag_runs
                     .insert(dag_run_id, DagRunData::new(dag_run));
             }
+        }
+    }
+
+    /// Set the total DAG runs count for a DAG
+    pub fn set_total_dag_runs(&mut self, dag_id: &str, total: i64) {
+        if let Some(dag_data) = self.dags.get_mut(dag_id) {
+            dag_data.total_dag_runs = total;
         }
     }
 
@@ -244,6 +253,14 @@ impl EnvironmentStateContainer {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Get the total DAG runs count for a specific DAG in the active environment
+    pub fn get_active_dag_runs_total(&self, dag_id: &str) -> i64 {
+        self.get_active_environment()
+            .and_then(|env| env.get_dag(dag_id))
+            .map(|dag_data| dag_data.total_dag_runs)
+            .unwrap_or(0)
     }
 
     /// Get all task instances for a specific DAG run in the active environment

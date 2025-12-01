@@ -30,6 +30,11 @@ pub enum WorkerMessage {
         dag_id: String,
         clear: bool,
     },
+    FetchMoreDagRuns {
+        dag_id: String,
+        offset: i64,
+        limit: i64,
+    },
     UpdateTaskInstances {
         dag_id: String,
         dag_run_id: String,
@@ -182,6 +187,28 @@ impl Worker {
                     Ok(dag_runs) => {
                         // Store DAG runs in the environment state
                         if let Some(env) = app.environment_state.get_active_environment_mut() {
+                            env.set_total_dag_runs(&dag_id, dag_runs.total_entries);
+                            for dag_run in &dag_runs.dag_runs {
+                                env.upsert_dag_run(dag_run.clone());
+                            }
+                        }
+                        // Sync panel data from environment state to refresh with new API data
+                        app.sync_panel_data();
+                    }
+                    Err(e) => {
+                        app.dagruns.error_popup =
+                            Some(ErrorPopup::from_strings(vec![e.to_string()]));
+                    }
+                }
+            }
+            WorkerMessage::FetchMoreDagRuns { dag_id, offset, limit } => {
+                let dag_runs = client.list_dagruns_paginated(&dag_id, offset, limit).await;
+                let mut app = self.app.lock().unwrap();
+                match dag_runs {
+                    Ok(dag_runs) => {
+                        // Store additional DAG runs in the environment state
+                        if let Some(env) = app.environment_state.get_active_environment_mut() {
+                            env.set_total_dag_runs(&dag_id, dag_runs.total_entries);
                             for dag_run in &dag_runs.dag_runs {
                                 env.upsert_dag_run(dag_run.clone());
                             }
