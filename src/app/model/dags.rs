@@ -283,6 +283,22 @@ impl Model for DagModel {
                 )
             }
             FlowrsEvent::Key(key_event) => {
+                // Handle Escape key with multi-stage behavior
+                if key_event.code == KeyCode::Esc {
+                    if self.filter.is_enabled() {
+                        // Filter dialogue is open: close it and clear any filter
+                        self.filter.reset();  // Closes dialogue and clears prefix
+                        self.filter_dags();
+                        return (None, vec![]);
+                    } else if self.filter.prefix.is_some() {
+                        // Filter dialogue closed but filter is applied: clear the filter
+                        self.filter.prefix = None;
+                        self.filter_dags();
+                        return (None, vec![]);
+                    }
+                    // else: no filter active, fall through to go back to environment page
+                }
+                
                 if self.filter.is_enabled() {
                     self.filter.update(key_event);
                     self.filter_dags();
