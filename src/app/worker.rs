@@ -22,6 +22,11 @@ pub enum WorkerMessage {
     UpdateDags {
         only_active: bool,
     },
+    FetchMoreDags {
+        only_active: bool,
+        offset: i64,
+        limit: i64,
+    },
     ToggleDag {
         dag_id: String,
         is_paused: bool,
@@ -149,26 +154,81 @@ impl Worker {
         let client = client.unwrap();
         match message {
             WorkerMessage::UpdateDags { only_active } => {
-                let dag_list = client.list_dags(only_active).await;
+                // Fetch initial 10 DAGs for immediate display
+                let dag_list = client.list_dags_paginated(0, 10, only_active).await;
                 let mut app = self.app.lock().unwrap();
                 match dag_list {
                     Ok(dag_list) => {
-                        debug!("Received {} DAGs from API (only_active: {})", dag_list.dags.len(), only_active);
+                        let total = dag_list.total_entries;
+                        debug!("Received {} DAGs from API (only_active: {}), total: {}", dag_list.dags.len(), only_active, total);
                         let active_count = dag_list.dags.iter().filter(|d| !d.is_paused).count();
                         let paused_count = dag_list.dags.iter().filter(|d| d.is_paused).count();
                         debug!("  Active: {}, Paused: {}", active_count, paused_count);
                         
-                        // Store DAGs in the environment state
+                        // Store initial DAGs in the environment state
                         if let Some(env) = app.environment_state.get_active_environment_mut() {
                             for dag in &dag_list.dags {
                                 env.upsert_dag(dag.clone());
                             }
                         }
+                        
+                        // Set loading status
+                        app.dags.loading_status = if dag_list.dags.len() >= total as usize {
+                            crate::app::model::dags::LoadingStatus::Complete
+                        } else {
+                            crate::app::model::dags::LoadingStatus::LoadingMore {
+                                current: dag_list.dags.len(),
+                                total: total as usize,
+                            }
+                        };
+                        
                         // Sync panel data from environment state
                         app.sync_panel_data();
                     }
                     Err(e) => {
                         app.dags.error_popup = Some(ErrorPopup::from_strings(vec![e.to_string()]));
+                        app.dags.loading_status = crate::app::model::dags::LoadingStatus::Complete;
+                    }
+                }
+            }
+            WorkerMessage::FetchMoreDags { only_active, offset, limit } => {
+                let dag_list = client.list_dags_paginated(offset, limit, only_active).await;
+                let mut app = self.app.lock().unwrap();
+                match dag_list {
+                    Ok(dag_list) => {
+                        let total = dag_list.total_entries;
+                        debug!("Fetched {} more DAGs at offset {}, total: {}", dag_list.dags.len(), offset, total);
+                        
+                        // Append to existing DAGs in environment state
+                        if let Some(env) = app.environment_state.get_active_environment_mut() {
+                            for dag in &dag_list.dags {
+                                env.upsert_dag(dag.clone());
+                            }
+                        }
+                        
+                        // Calculate new current count
+                        let current_count = app.environment_state
+                            .get_active_dags()
+                            .len();
+                        
+                        // Update loading status
+                        app.dags.loading_status = if current_count >= total as usize {
+                            crate::app::model::dags::LoadingStatus::Complete
+                        } else {
+                            crate::app::model::dags::LoadingStatus::LoadingMore {
+                                current: current_count,
+                                total: total as usize,
+                            }
+                        };
+                        
+                        // Sync panel data from environment state
+                        app.sync_panel_data();
+                    }
+                    Err(e) => {
+                        // Retry logic: keep current loading status, error will be logged
+                        log::error!("Failed to fetch more DAGs at offset {}: {}", offset, e);
+                        // Don't show popup for background fetches to avoid disrupting user
+                        // The tick handler will retry on the next tick
                     }
                 }
             }

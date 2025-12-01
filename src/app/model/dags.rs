@@ -30,6 +30,14 @@ const STATE_COLUMN_WIDTH: u16 = 5;
 /// Height of the import errors panel
 const IMPORT_ERRORS_PANEL_HEIGHT: u16 = 15;
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LoadingStatus {
+    NotStarted,
+    LoadingInitial,
+    LoadingMore { current: usize, total: usize },
+    Complete,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum DagStatus {
     Failed,    // Highest priority (sort first)
@@ -90,6 +98,7 @@ pub struct DagModel {
     pub focused_section: DagFocusedSection,
     commands: Option<&'static CommandPopUp<'static>>,
     pub error_popup: Option<ErrorPopup>,
+    pub loading_status: LoadingStatus,
     ticks: u32,
     event_buffer: Vec<FlowrsEvent>,
 }
@@ -107,6 +116,7 @@ impl DagModel {
             import_errors: ImportErrorWidget::default(),
             import_error_list: vec![],
             focused_section: DagFocusedSection::DagTable,
+            loading_status: LoadingStatus::NotStarted,
             ticks: 0,
             commands: None,
             error_popup: None,
@@ -139,9 +149,14 @@ impl DagModel {
             filtered_dags.retain(|dag| !dag.is_paused);
         }
         
-        // Step 3: Sort alphabetically by name
+        // Step 3: Sort - UNPAUSED FIRST, then alphabetically
         filtered_dags.sort_by(|a, b| {
-            a.dag_id.cmp(&b.dag_id)
+            // Primary: unpaused DAGs first
+            match (a.is_paused, b.is_paused) {
+                (false, true) => std::cmp::Ordering::Less,    // a unpaused, b paused -> a first
+                (true, false) => std::cmp::Ordering::Greater, // a paused, b unpaused -> b first
+                _ => a.dag_id.cmp(&b.dag_id),                 // Both same state -> alphabetical
+            }
         });
         
         self.filtered.items = filtered_dags;
@@ -314,22 +329,94 @@ impl Model for DagModel {
         match event {
             FlowrsEvent::Tick => {
                 self.ticks += 1;
-                if !self.ticks.is_multiple_of(10) {
-                    return (Some(FlowrsEvent::Tick), vec![]);
+                
+                match &self.loading_status {
+                    LoadingStatus::NotStarted => {
+                        // Trigger initial load on first tick
+                        self.loading_status = LoadingStatus::LoadingInitial;
+                        return (
+                            Some(FlowrsEvent::Tick),
+                            vec![
+                                WorkerMessage::UpdateDags {
+                                    only_active: !self.show_paused,
+                                },
+                            ],
+                        );
+                    }
+                    LoadingStatus::LoadingInitial => {
+                        // Waiting for initial load to complete
+                        return (Some(FlowrsEvent::Tick), vec![]);
+                    }
+                    LoadingStatus::LoadingMore { current, total } => {
+                        // Progressive loading with exponential batch sizes
+                        // Exponential: 10 -> 20 -> 40 -> 80 -> 160...
+                        let next_batch_size = if *current < 10 {
+                            20  // After initial 10, fetch 20
+                        } else if *current < 30 {
+                            40  // After 30, fetch 40
+                        } else if *current < 70 {
+                            80  // After 70, fetch 80
+                        } else {
+                            100 // After 150+, fetch 100 at a time
+                        };
+                        
+                        // Fetch more frequently during initial loading (every tick)
+                        // Then slow down to every 2-3 ticks for larger batches
+                        let tick_interval = if *current < 50 { 1 } else { 2 };
+                        
+                        if self.ticks.is_multiple_of(tick_interval) && current < total {
+                            return (
+                                Some(FlowrsEvent::Tick),
+                                vec![
+                                    WorkerMessage::FetchMoreDags {
+                                        only_active: !self.show_paused,
+                                        offset: *current as i64,
+                                        limit: next_batch_size,
+                                    }
+                                ],
+                            );
+                        }
+                        
+                        // Once we have 50+ DAGs, start fetching stats
+                        if *current >= 50 && self.ticks.is_multiple_of(10) {
+                            return (
+                                Some(FlowrsEvent::Tick),
+                                vec![
+                                    WorkerMessage::UpdateDagStats { clear: false },
+                                    WorkerMessage::UpdateImportErrors,
+                                    WorkerMessage::UpdateRecentDagRuns,
+                                ],
+                            );
+                        }
+                    }
+                    LoadingStatus::Complete => {
+                        // All DAGs loaded - periodic refresh of stats only
+                        if self.ticks.is_multiple_of(10) {
+                            return (
+                                Some(FlowrsEvent::Tick),
+                                vec![
+                                    WorkerMessage::UpdateDagStats { clear: false },
+                                    WorkerMessage::UpdateImportErrors,
+                                    WorkerMessage::UpdateRecentDagRuns,
+                                ],
+                            );
+                        }
+                        
+                        // Full refresh every 100 ticks (~100 seconds)
+                        if self.ticks.is_multiple_of(100) {
+                            return (
+                                Some(FlowrsEvent::Tick),
+                                vec![
+                                    WorkerMessage::UpdateDags {
+                                        only_active: !self.show_paused,
+                                    },
+                                ],
+                            );
+                        }
+                    }
                 }
                 
-                // UpdateImportErrors now fetches both count and full error list
-                (
-                    Some(FlowrsEvent::Tick),
-                    vec![
-                        WorkerMessage::UpdateDags {
-                            only_active: !self.show_paused,
-                        },
-                        WorkerMessage::UpdateDagStats { clear: true },
-                        WorkerMessage::UpdateImportErrors,
-                        WorkerMessage::UpdateRecentDagRuns,
-                    ],
-                )
+                (Some(FlowrsEvent::Tick), vec![])
             }
             FlowrsEvent::Key(key_event) => {
                 // Handle Escape key with multi-stage behavior
@@ -693,9 +780,16 @@ impl Widget for &mut DagModel {
                     let showing_count = self.filtered.items.len();
                     let total_count = self.all.iter().filter(|d| d.is_active.unwrap_or(false)).count();
                     
+                    let status_text = match &self.loading_status {
+                        LoadingStatus::LoadingInitial => " (loading...)".to_string(),
+                        LoadingStatus::LoadingMore { current, total } => 
+                            format!(" (loaded {}/{})", current, total),
+                        LoadingStatus::Complete | LoadingStatus::NotStarted => String::new(),
+                    };
+                    
                     format!(
-                        "DAGs (showing {} of {}) - Press <?> for commands",
-                        showing_count, total_count
+                        "DAGs (showing {} of {}){} - Press <?> for commands",
+                        showing_count, total_count, status_text
                     )
                 })
                 .border_style(dags_border_style)

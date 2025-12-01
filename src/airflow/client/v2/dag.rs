@@ -10,6 +10,34 @@ use super::V2Client;
 
 #[async_trait]
 impl DagOperations for V2Client {
+    async fn list_dags_paginated(&self, offset: i64, limit: i64, only_active: bool) -> Result<DagList> {
+        debug!("list_dags_paginated called with offset={}, limit={}, only_active={}", offset, limit, only_active);
+        
+        let response = self
+            .base_api(Method::GET, "dags")?
+            .query(&[
+                ("limit", limit.to_string()),
+                ("offset", offset.to_string()),
+                ("order_by", "dag_id".to_string()),
+                ("only_active", "false".to_string())
+            ])
+            .send()
+            .await?
+            .error_for_status()?;
+
+        let page: model::dag::DagList = response.json().await?;
+        
+        let total_entries = page.total_entries;
+        let fetched_count = page.dags.len();
+        
+        debug!("Fetched {} DAGs at offset {}, total in system: {}", fetched_count, offset, total_entries);
+        
+        Ok(DagList { 
+            dags: page.dags.into_iter().map(|d| d.into()).collect(),
+            total_entries,
+        })
+    }
+
     async fn list_dags(&self, only_active: bool) -> Result<DagList> {
         // Fetch all DAGs using pagination
         // Note: only_active filters by is_active (scheduler visibility), not is_paused
@@ -22,18 +50,7 @@ impl DagOperations for V2Client {
         let mut total_entries = 0;
         
         loop {
-            let response = self
-                .base_api(Method::GET, "dags")?
-                .query(&[
-                    ("limit", limit.to_string()),
-                    ("offset", offset.to_string()),
-                    ("only_active", "false".to_string())
-                ])
-                .send()
-                .await?
-                .error_for_status()?;
-
-            let page: model::dag::DagList = response.json().await?;
+            let page = self.list_dags_paginated(offset, limit, only_active).await?;
             
             total_entries = page.total_entries;
             let fetched_count = page.dags.len();
@@ -42,7 +59,7 @@ impl DagOperations for V2Client {
             debug!("Fetched {} DAGs at offset {}, total so far: {}/{}", fetched_count, offset, all_dags.len(), total_entries);
             
             // Break if we've fetched all DAGs or got fewer than limit (last page)
-            if all_dags.len() >= total_entries as usize || fetched_count < limit {
+            if all_dags.len() >= total_entries as usize || fetched_count < limit as usize {
                 break;
             }
             
@@ -52,7 +69,7 @@ impl DagOperations for V2Client {
         info!("DAGs fetched: {} out of {} total (only_active: {})", all_dags.len(), total_entries, only_active);
         
         Ok(DagList { 
-            dags: all_dags.into_iter().map(|d| d.into()).collect(),
+            dags: all_dags,
             total_entries,
         })
     }

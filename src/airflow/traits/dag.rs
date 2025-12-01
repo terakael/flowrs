@@ -12,6 +12,14 @@ pub trait DagOperations: Send + Sync {
     /// * `only_active` - If true, only return active (non-paused) DAGs
     async fn list_dags(&self, only_active: bool) -> Result<DagList>;
 
+    /// List DAGs with pagination support
+    /// 
+    /// # Arguments
+    /// * `offset` - Number of DAGs to skip
+    /// * `limit` - Maximum number of DAGs to return
+    /// * `only_active` - If true, only return active (non-paused) DAGs
+    async fn list_dags_paginated(&self, offset: i64, limit: i64, only_active: bool) -> Result<DagList>;
+
     /// Toggle a DAG's paused state
     async fn toggle_dag(&self, dag_id: &str, is_paused: bool) -> Result<()>;
 
