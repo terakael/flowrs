@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 use crossterm::event::KeyCode;
 use log::debug;
@@ -9,7 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Row, StatefulWidget, Table, Widget};
 use time::OffsetDateTime;
 
-use crate::airflow::model::common::{Dag, DagStatistic};
+use crate::airflow::model::common::{Dag, DagRun, DagStatistic};
 use crate::app::events::custom::FlowrsEvent;
 use crate::app::model::popup::dags::commands::DAG_COMMAND_POP_UP;
 use crate::ui::common::create_headers;
@@ -19,6 +21,12 @@ use super::popup::commands_help::CommandPopUp;
 use super::popup::error::ErrorPopup;
 use super::{filter::Filter, Model, StatefulTable};
 use crate::app::worker::{OpenItem, WorkerMessage};
+
+// Constants for DAG health monitoring and UI layout
+/// Number of recent runs to analyze for DAG health indicators
+pub const RECENT_RUNS_HEALTH_WINDOW: usize = 7;
+/// Width of the state column (for colored square indicator)
+const STATE_COLUMN_WIDTH: u16 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum DagStatus {
@@ -31,6 +39,7 @@ enum DagStatus {
 pub struct DagModel {
     pub all: Vec<Dag>,
     pub dag_stats: HashMap<String, Vec<DagStatistic>>,
+    pub recent_runs: HashMap<String, Vec<DagRun>>,  // Store recent runs for each DAG
     pub filtered: StatefulTable<Dag>,
     pub filter: Filter,
     pub show_paused: bool,
@@ -46,6 +55,7 @@ impl DagModel {
         DagModel {
             all: vec![],
             dag_stats: HashMap::new(),
+            recent_runs: HashMap::new(),
             filtered: StatefulTable::new(vec![]),
             filter: Filter::new(),
             show_paused: false,
@@ -113,12 +123,85 @@ impl DagModel {
         
         DagStatus::Idle
     }
+
+    /// Get DAG state color based on recent runs (last 7)
+    /// - Green: all tasks in all runs succeeded
+    /// - Yellow: latest run succeeded, but one of past 7 failed  
+    /// - Red: latest run failed
+    /// - DarkGray: Paused
+    /// - Reset: No data
+    fn get_dag_color(&self, dag: &Dag) -> Color {
+        if dag.is_paused {
+            return Color::DarkGray;  // Gray square for paused DAGs
+        }
+
+        if let Some(runs) = self.recent_runs.get(&dag.dag_id) {
+            Self::analyze_run_health(runs)
+        } else {
+            Color::Reset  // No run data
+        }
+    }
+
+    /// Analyze recent runs to determine DAG health color
+    fn analyze_run_health(runs: &[DagRun]) -> Color {
+        if runs.is_empty() {
+            return Color::Reset;  // No runs yet
+        }
+
+        // Runs should be sorted newest first
+        let latest_run = &runs[0];
+        
+        if Self::is_failed_state(&latest_run.state) {
+            return Color::Red;  // Latest run failed
+        }
+
+        if latest_run.state == "success" {
+            if Self::has_recent_failures(&runs[1..]) {
+                crate::ui::constants::YELLOW  // Warning - recovered from failure
+            } else {
+                crate::ui::constants::GREEN  // All good
+            }
+        } else {
+            Color::Reset  // Latest still running or other state
+        }
+    }
+
+    /// Check if a state represents a failed run
+    fn is_failed_state(state: &str) -> bool {
+        matches!(state, "failed" | "upstream_failed")
+    }
+
+    /// Check if any recent runs have failed
+    fn has_recent_failures(runs: &[DagRun]) -> bool {
+        runs.iter()
+            .take(RECENT_RUNS_HEALTH_WINDOW - 1)  // Check past runs (excluding latest)
+            .any(|run| Self::is_failed_state(&run.state))
+    }
 }
 
 impl Default for DagModel {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Map a tag name to a consistent color using hash
+fn tag_to_color(tag_name: &str) -> Color {
+    // Available colors for tags (avoiding red/green/yellow which are used for states)
+    const TAG_COLORS: &[Color] = &[
+        crate::ui::constants::BLUE,
+        crate::ui::constants::MAGENTA,
+        crate::ui::constants::CYAN,
+        crate::ui::constants::BRIGHT_BLUE,
+        crate::ui::constants::BRIGHT_MAGENTA,
+        crate::ui::constants::BRIGHT_CYAN,
+    ];
+    
+    let mut hasher = DefaultHasher::new();
+    tag_name.hash(&mut hasher);
+    let hash = hasher.finish();
+    
+    TAG_COLORS[(hash as usize) % TAG_COLORS.len()]
 }
 
 impl Model for DagModel {
@@ -137,6 +220,7 @@ impl Model for DagModel {
                         },
                         WorkerMessage::UpdateDagStats { clear: true },
                         WorkerMessage::UpdateImportErrors,
+                        WorkerMessage::UpdateRecentDagRuns,
                     ],
                 )
             }
@@ -290,62 +374,76 @@ impl Widget for &mut DagModel {
         };
         let selected_style = crate::ui::constants::SELECTED_STYLE;
 
-        let headers = ["Name", "Schedule", "Next Run", "Tags"];
+        let headers = ["State", "Name", "Schedule", "Next Run", "Tags"];
         let header_row = create_headers(headers);
         let header = Row::new(header_row)
             .style(DEFAULT_STYLE.reversed())
             .add_modifier(Modifier::BOLD);
         let rows =
             self.filtered.items.iter().enumerate().map(|(idx, item)| {
+                // Determine DAG color based on recent runs
+                let color = self.get_dag_color(item);
+                
                 Row::new(vec![
+                    Line::from(Span::styled("■", Style::default().fg(color))),
+                    Line::from(item.dag_id.as_str()),
                     {
-                        // Determine DAG name color based on status
-                        let status = self.get_dag_status(item);
-                        let name_style = match status {
-                            DagStatus::Failed => Style::default()
-                                .fg(Color::Red)
-                                .add_modifier(Modifier::BOLD),
-                            DagStatus::Running => Style::default()
-                                .fg(Color::Green)
-                                .add_modifier(Modifier::BOLD),
-                            DagStatus::Paused => Style::default()
-                                .fg(Color::DarkGray)
-                                .add_modifier(Modifier::BOLD),
-                            DagStatus::Idle => Style::default()
-                                .add_modifier(Modifier::BOLD),
-                        };
-                        Line::from(Span::styled(item.dag_id.as_str(), name_style))
-                    },
-                    Line::from({
                         let schedule = item.timetable_description.as_deref().unwrap_or("None");
                         // Shorten "Never, external triggers only" to just "Never"
-                        if schedule.starts_with("Never") {
+                        let schedule_text = if schedule.starts_with("Never") {
                             "Never"
                         } else {
                             schedule
+                        };
+                        // Gray out "Never" and "None"
+                        if schedule_text == "Never" || schedule_text == "None" {
+                            Line::from(Span::styled(schedule_text, Style::default().fg(Color::DarkGray)))
+                        } else {
+                            Line::from(schedule_text)
                         }
-                    })
-                    .style(Style::default().fg(Color::LightYellow)),
-                    Line::from(if let Some(date) = item.next_dagrun_create_after {
-                        convert_datetimeoffset_to_human_readable_remaining_time(date)
-                    } else {
-                        "None".to_string()
-                    }),
-                    Line::from(if item.tags.is_empty() {
-                        "".to_string()
-                    } else {
-                        item.tags.iter().map(|tag| tag.name.as_str()).collect::<Vec<_>>().join(", ")
-                    }),
+                    },
+                    {
+                        if let Some(date) = item.next_dagrun_create_after {
+                            Line::from(convert_datetimeoffset_to_human_readable_remaining_time(date))
+                        } else {
+                            Line::from(Span::styled("None", Style::default().fg(Color::DarkGray)))
+                        }
+                    },
+                    {
+                        if item.tags.is_empty() {
+                            Line::from("")
+                        } else {
+                            // Create colored spans for each tag
+                            let mut spans = Vec::new();
+                            for (i, tag) in item.tags.iter().enumerate() {
+                                if i > 0 {
+                                    spans.push(Span::raw(", "));
+                                }
+                                let color = tag_to_color(&tag.name);
+                                spans.push(Span::styled(&tag.name, Style::default().fg(color)));
+                            }
+                            Line::from(spans)
+                        }
+                    },
                 ])
-                .style(if (idx % 2) == 0 {
-                    DEFAULT_STYLE
-                } else {
-                    DEFAULT_STYLE.bg(ALTERNATING_ROW_COLOR)
+                .style({
+                    let base_style = if (idx % 2) == 0 {
+                        DEFAULT_STYLE
+                    } else {
+                        DEFAULT_STYLE.bg(ALTERNATING_ROW_COLOR)
+                    };
+                    // Gray out paused DAGs
+                    if item.is_paused {
+                        base_style.fg(Color::DarkGray)
+                    } else {
+                        base_style
+                    }
                 })
             });
         let t = Table::new(
             rows,
             &[
+                Constraint::Length(STATE_COLUMN_WIDTH),
                 Constraint::Fill(2),
                 Constraint::Length(10),
                 Constraint::Length(10),

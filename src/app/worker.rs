@@ -47,6 +47,7 @@ pub enum WorkerMessage {
     UpdateDagStats {
         clear: bool,
     },
+    UpdateRecentDagRuns,  // Fetch recent runs for all DAGs
     UpdateImportErrors,
     ClearDagRun {
         dag_run_id: String,
@@ -342,6 +343,59 @@ impl Worker {
                         // Log the error but don't show popup to user
                         log::warn!("Failed to fetch DAG stats (this is optional): {}", e);
                         log::info!("DAG stats will not be available. This is normal for some Airflow versions.");
+                    }
+                }
+            }
+            WorkerMessage::UpdateRecentDagRuns => {
+                // Fetch recent runs for DAG health indicators in the list view.
+                // Only fetches for unpaused DAGs to optimize bandwidth usage - paused DAGs
+                // don't need health monitoring since they won't execute new runs.
+                let dag_ids = {
+                    let app = self.app.lock().unwrap();
+                    app.environment_state
+                        .get_active_dags()
+                        .iter()
+                        .filter(|dag| !dag.is_paused)
+                        .map(|dag| dag.dag_id.clone())
+                        .collect::<Vec<_>>()
+                };
+                
+                // Skip if no unpaused DAGs are loaded yet
+                if dag_ids.is_empty() {
+                    return Ok(());
+                }
+                
+                debug!("Fetching recent runs for {} unpaused DAGs", dag_ids.len());
+                
+                // Fetch last N runs for each unpaused DAG in parallel
+                let recent_runs_futures = dag_ids.iter().map(|dag_id| {
+                    let dag_id_clone = dag_id.clone();
+                    let client_clone = client.clone();
+                    async move {
+                        let runs = client_clone.list_dagruns(&dag_id_clone).await;
+                        (dag_id_clone, runs)
+                    }
+                });
+                
+                let results = join_all(recent_runs_futures).await;
+                
+                // Store results in app state
+                let mut app = self.app.lock().unwrap();
+                for (dag_id, result) in results {
+                    match result {
+                        Ok(dag_run_list) => {
+                            // Take first RECENT_RUNS_HEALTH_WINDOW runs (API returns newest first)
+                            let recent_runs: Vec<_> = dag_run_list.dag_runs
+                                .into_iter()
+                                .take(crate::app::model::dags::RECENT_RUNS_HEALTH_WINDOW)
+                                .collect();
+                            debug!("Fetched {} recent runs for DAG {}", recent_runs.len(), dag_id);
+                            app.dags.recent_runs.insert(dag_id, recent_runs);
+                        }
+                        Err(e) => {
+                            // Log but don't show error - this is an enhancement feature
+                            log::debug!("Failed to fetch recent runs for {}: {}", dag_id, e);
+                        }
                     }
                 }
             }
