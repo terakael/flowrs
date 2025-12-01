@@ -78,6 +78,7 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: Arc<Mutex<App>
             };
 
             // Process messages and sync cached data immediately
+            let mut additional_messages = Vec::new();
             for message in &messages {
                 // Set context IDs and sync cached data before worker processes the message
                 {
@@ -89,6 +90,14 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: Arc<Mutex<App>
                                 // Sync cached data immediately
                                 app.dagruns.all = app.environment_state.get_active_dag_runs(dag_id);
                                 app.dagruns.filter_dag_runs();
+                                
+                                // Pre-fetch task order for this DAG if not already cached
+                                // This ensures task instances display in correct order immediately when user enters them
+                                if !app.environment_state.has_task_order(dag_id) {
+                                    additional_messages.push(WorkerMessage::FetchTaskOrder {
+                                        dag_id: dag_id.clone(),
+                                    });
+                                }
                             }
                         }
                         WorkerMessage::UpdateTaskInstances {
@@ -104,6 +113,14 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: Arc<Mutex<App>
                                     .environment_state
                                     .get_active_task_instances(dag_id, dag_run_id);
                                 app.task_instances.filter_task_instances();
+                                
+                                // Task order should already be cached from when we entered DAGRun panel
+                                // If not (e.g., direct navigation), fetch as fallback
+                                if !app.environment_state.has_task_order(dag_id) {
+                                    additional_messages.push(WorkerMessage::FetchTaskOrder {
+                                        dag_id: dag_id.clone(),
+                                    });
+                                }
                             }
                         }
                         WorkerMessage::UpdateTaskLogs {
@@ -132,6 +149,13 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: Arc<Mutex<App>
             for message in messages {
                 if let Err(e) = tx_worker.send(message).await {
                     log::error!("Failed to send message to worker: {e}");
+                }
+            }
+            
+            // Send additional messages generated during message processing
+            for message in additional_messages {
+                if let Err(e) = tx_worker.send(message).await {
+                    log::error!("Failed to send additional message to worker: {e}");
                 }
             }
             if fall_through_event.is_none() {

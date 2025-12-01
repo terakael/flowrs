@@ -13,7 +13,7 @@ use crate::airflow::model::common::{Dag, DagStatistic};
 use crate::app::events::custom::FlowrsEvent;
 use crate::app::model::popup::dags::commands::DAG_COMMAND_POP_UP;
 use crate::ui::common::create_headers;
-use crate::ui::constants::{AirflowStateColor, ALTERNATING_ROW_COLOR, DEFAULT_STYLE};
+use crate::ui::constants::{ALTERNATING_ROW_COLOR, DEFAULT_STYLE};
 
 use super::popup::commands_help::CommandPopUp;
 use super::popup::error::ErrorPopup;

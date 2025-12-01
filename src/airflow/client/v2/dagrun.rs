@@ -102,7 +102,7 @@ mod tests {
         }
 
         let client = get_test_client();
-        let dags = client.list_dags().await.unwrap();
+        let dags = client.list_dags(false).await.unwrap();
         let dag_id = &dags.dags[0].dag_id;
         let dagruns = client.list_dagruns(dag_id).await.unwrap();
         assert!(!dagruns.dag_runs.is_empty());

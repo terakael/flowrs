@@ -116,13 +116,20 @@ impl App {
                 }
             }
             Panel::TaskInstance => {
-                if let (Some(dag_id), Some(dag_run_id)) =
-                    (&self.task_instances.dag_id, &self.task_instances.dag_run_id)
-                {
+                // Clone the IDs to avoid borrow checker issues
+                let dag_id = self.task_instances.dag_id.clone();
+                let dag_run_id = self.task_instances.dag_run_id.clone();
+                
+                if let (Some(dag_id), Some(dag_run_id)) = (dag_id, dag_run_id) {
                     self.task_instances.all = self
                         .environment_state
-                        .get_active_task_instances(dag_id, dag_run_id);
+                        .get_active_task_instances(&dag_id, &dag_run_id);
                     self.task_instances.filter_task_instances();
+                    
+                    // Apply topological ordering if available
+                    if let Some(task_order) = self.environment_state.get_task_order(&dag_id) {
+                        self.apply_task_order(&task_order);
+                    }
                 } else {
                     self.task_instances.all.clear();
                 }
@@ -142,5 +149,23 @@ impl App {
                 // Config panel doesn't need syncing
             }
         }
+    }
+    
+    /// Apply topological ordering to task instances
+    fn apply_task_order(&mut self, task_order: &[String]) {
+        // Create a map of task_id -> position in the topological order
+        let position_map: std::collections::HashMap<&str, usize> = task_order
+            .iter()
+            .enumerate()
+            .map(|(idx, task_id)| (task_id.as_str(), idx))
+            .collect();
+        
+        // Sort filtered items by position in topological order
+        self.task_instances.filtered.items.sort_by_key(|task| {
+            position_map
+                .get(task.task_id.as_str())
+                .copied()
+                .unwrap_or(usize::MAX) // Tasks not in order go to the end
+        });
     }
 }

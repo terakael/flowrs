@@ -7,16 +7,14 @@ use crossterm::event::KeyCode;
 use log::debug;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style, Stylize};
+use ratatui::style::{Modifier, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::{Block, BorderType, Borders, Row, StatefulWidget, Table, Widget};
-use time::format_description;
 
 use crate::airflow::model::common::TaskInstance;
 use crate::app::events::custom::FlowrsEvent;
 use crate::ui::common::{create_headers, state_to_colored_square};
 use crate::ui::constants::{AirflowStateColor, ALTERNATING_ROW_COLOR, DEFAULT_STYLE, MARKED_COLOR};
-use crate::ui::TIME_FORMAT;
 
 use super::popup::taskinstances::clear::ClearTaskInstancePopup;
 use super::popup::taskinstances::mark::MarkTaskInstancePopup;
@@ -286,7 +284,7 @@ impl Widget for &mut TaskInstanceModel {
 
         let selected_style = crate::ui::constants::SELECTED_STYLE;
 
-        let headers = ["Task ID", "Execution Date", "Duration", "State", "Tries"];
+        let headers = ["Task ID", "Duration", "State", "Tries"];
         let header_row = create_headers(headers);
         let header =
             Row::new(header_row).style(DEFAULT_STYLE.reversed().add_modifier(Modifier::BOLD));
@@ -294,15 +292,8 @@ impl Widget for &mut TaskInstanceModel {
         let rows = self.filtered.items.iter().enumerate().map(|(idx, item)| {
             Row::new(vec![
                 Line::from(item.task_id.as_str()),
-                Line::from(if let Some(date) = item.logical_date {
-                    date.format(&format_description::parse(TIME_FORMAT).unwrap())
-                        .unwrap()
-                        .clone()
-                } else {
-                    "None".to_string()
-                }),
-                Line::from(if let Some(i) = item.duration {
-                    format!("{i}")
+                Line::from(if let Some(duration) = item.duration {
+                    format!("{}", duration.ceil() as i64)
                 } else {
                     "None".to_string()
                 }),
@@ -335,8 +326,7 @@ impl Widget for &mut TaskInstanceModel {
             rows,
             &[
                 Constraint::Fill(1),
-                Constraint::Min(19),
-                Constraint::Length(20),
+                Constraint::Length(10),
                 Constraint::Length(5),
                 Constraint::Length(5),
             ],

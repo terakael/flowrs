@@ -73,6 +73,7 @@ pub struct EnvironmentData {
     pub client: Arc<dyn AirflowClientTrait>,
     pub dags: HashMap<DagId, DagData>,
     pub dag_details: HashMap<DagId, Dag>,
+    pub task_order: HashMap<DagId, Vec<String>>,
 }
 
 impl EnvironmentData {
@@ -81,6 +82,7 @@ impl EnvironmentData {
             client,
             dags: HashMap::new(),
             dag_details: HashMap::new(),
+            task_order: HashMap::new(),
         }
     }
 
@@ -152,6 +154,16 @@ impl EnvironmentData {
     /// Set detailed DAG information
     pub fn set_dag_details(&mut self, dag_id: String, dag: Dag) {
         self.dag_details.insert(dag_id, dag);
+    }
+    
+    /// Get task order for a DAG
+    pub fn get_task_order(&self, dag_id: &str) -> Option<&Vec<String>> {
+        self.task_order.get(dag_id)
+    }
+    
+    /// Set task order for a DAG
+    pub fn set_task_order(&mut self, dag_id: String, order: Vec<String>) {
+        self.task_order.insert(dag_id, order);
     }
 }
 
@@ -266,6 +278,27 @@ impl EnvironmentStateContainer {
         if let Some(env) = self.get_active_environment_mut() {
             env.set_dag_details(dag_id, dag);
         }
+    }
+    
+    /// Check if task order exists for a DAG in the active environment
+    pub fn has_task_order(&self, dag_id: &str) -> bool {
+        self.get_active_environment()
+            .and_then(|env| env.get_task_order(dag_id))
+            .is_some()
+    }
+    
+    /// Set task order for a DAG in the active environment
+    pub fn set_task_order(&mut self, dag_id: String, order: Vec<String>) {
+        if let Some(env) = self.get_active_environment_mut() {
+            env.set_task_order(dag_id, order);
+        }
+    }
+    
+    /// Get task order for a DAG in the active environment
+    pub fn get_task_order(&self, dag_id: &str) -> Option<Vec<String>> {
+        self.get_active_environment()
+            .and_then(|env| env.get_task_order(dag_id))
+            .cloned()
     }
 }
 

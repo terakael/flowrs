@@ -35,6 +35,9 @@ pub enum WorkerMessage {
         dag_run_id: String,
         clear: bool,
     },
+    FetchTaskOrder {
+        dag_id: String,
+    },
     GetDagCode {
         dag_id: String,
     },
@@ -215,6 +218,27 @@ impl Worker {
                         log::error!("Error getting task instances: {e:?}");
                         app.task_instances.error_popup =
                             Some(ErrorPopup::from_strings(vec![e.to_string()]));
+                    }
+                }
+            }
+            WorkerMessage::FetchTaskOrder { dag_id } => {
+                // Fetch tasks from API
+                let tasks = client.list_tasks(&dag_id).await;
+                match tasks {
+                    Ok(tasks) => {
+                        debug!("Fetched {} tasks for DAG {}", tasks.len(), dag_id);
+                        
+                        // Perform topological sort
+                        let sorted_task_ids = crate::airflow::topological_sort::topological_sort(tasks);
+                        
+                        // Store the sorted order in environment state
+                        let mut app = self.app.lock().unwrap();
+                        app.environment_state.set_task_order(dag_id, sorted_task_ids);
+                    }
+                    Err(e) => {
+                        log::error!("Failed to fetch tasks for {}: {}", dag_id, e);
+                        // Don't show error popup - task ordering is an enhancement, not critical
+                        // Tasks will just appear in the order returned by the API
                     }
                 }
             }
