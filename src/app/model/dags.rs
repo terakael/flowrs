@@ -154,10 +154,15 @@ impl Model for DagModel {
                                 debug!("Selected dag: {selected_dag}");
                                 return (
                                     Some(FlowrsEvent::Key(*key_event)),
-                                    vec![WorkerMessage::UpdateDagRuns {
-                                        dag_id: selected_dag,
-                                        clear: true,
-                                    }],
+                                    vec![
+                                        WorkerMessage::UpdateDagRuns {
+                                            dag_id: selected_dag.clone(),
+                                            clear: true,
+                                        },
+                                        WorkerMessage::GetDagDetails {
+                                            dag_id: selected_dag,
+                                        },
+                                    ],
                                 );
                             }
                             self.error_popup = Some(ErrorPopup::from_strings(vec![

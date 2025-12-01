@@ -1,7 +1,7 @@
 use crossterm::event::KeyCode;
 use log::debug;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Borders, Clear, Paragraph, Row, Scrollbar, ScrollbarOrientation,
@@ -30,18 +30,10 @@ use super::popup::{dagruns::clear::ClearDagRunPopup, dagruns::mark::MarkDagRunPo
 use super::{filter::Filter, Model, StatefulTable};
 use crate::app::worker::{OpenItem, WorkerMessage};
 
-pub struct DagRunModel {
-    pub dag_id: Option<String>,
-    pub dag_code: DagCodeWidget,
-    pub all: Vec<DagRun>,
-    pub filtered: StatefulTable<DagRun>,
-    pub filter: Filter,
-    pub marked: Vec<usize>,
-    pub popup: Option<DagRunPopUp>,
-    pub commands: Option<&'static CommandPopUp<'static>>,
-    pub error_popup: Option<ErrorPopup>,
-    ticks: u32,
-    event_buffer: Vec<FlowrsEvent>,
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DagRunFocusedSection {
+    InfoSection,
+    DagRunsTable,
 }
 
 #[derive(Default)]
@@ -65,11 +57,65 @@ impl DagCodeWidget {
     }
 }
 
+#[derive(Default)]
+pub struct DagInfoWidget {
+    pub cached_lines: Option<Vec<Line<'static>>>,
+    pub vertical_scroll: usize,
+    pub vertical_scroll_state: ScrollbarState,
+}
+
+impl DagInfoWidget {
+    pub fn set_info(&mut self, dag: &crate::airflow::model::common::Dag) {
+        let new_lines = format_dag_info(dag);
+        let content_length = new_lines.len();
+        
+        // Only reset scroll position if this is the first time loading
+        // (i.e., cached_lines is None). Otherwise, preserve the current scroll position.
+        if self.cached_lines.is_none() {
+            self.vertical_scroll = 0;
+        } else {
+            // Ensure scroll position doesn't exceed new content length
+            self.vertical_scroll = self.vertical_scroll.min(content_length.saturating_sub(1));
+        }
+        
+        self.cached_lines = Some(new_lines);
+        self.vertical_scroll_state = ScrollbarState::default()
+            .content_length(content_length)
+            .position(self.vertical_scroll);
+    }
+
+    pub fn clear(&mut self) {
+        self.cached_lines = None;
+        self.vertical_scroll = 0;
+        self.vertical_scroll_state = ScrollbarState::default();
+    }
+}
+
+pub struct DagRunModel {
+    pub dag_id: Option<String>,
+    pub dag_details: Option<crate::airflow::model::common::Dag>,
+    pub dag_info: DagInfoWidget,
+    pub dag_code: DagCodeWidget,
+    pub focused_section: DagRunFocusedSection,
+    pub all: Vec<DagRun>,
+    pub filtered: StatefulTable<DagRun>,
+    pub filter: Filter,
+    pub marked: Vec<usize>,
+    pub popup: Option<DagRunPopUp>,
+    pub commands: Option<&'static CommandPopUp<'static>>,
+    pub error_popup: Option<ErrorPopup>,
+    ticks: u32,
+    event_buffer: Vec<FlowrsEvent>,
+}
+
 impl DagRunModel {
     pub fn new() -> Self {
         DagRunModel {
             dag_id: None,
+            dag_details: None,
+            dag_info: DagInfoWidget::default(),
             dag_code: DagCodeWidget::default(),
+            focused_section: DagRunFocusedSection::DagRunsTable,
             all: vec![],
             filtered: StatefulTable::new(vec![]),
             filter: Filter::new(),
@@ -111,6 +157,12 @@ impl DagRunModel {
                 dag_run.state = status.to_string();
             }
         });
+    }
+
+    pub fn init_info_scroll(&mut self) {
+        if let Some(dag) = &self.dag_details {
+            self.dag_info.set_info(dag);
+        }
     }
 }
 
@@ -230,10 +282,42 @@ impl Model for DagRunModel {
                 } else {
                     match key_event.code {
                         KeyCode::Down | KeyCode::Char('j') => {
-                            self.filtered.next();
+                            match self.focused_section {
+                                DagRunFocusedSection::InfoSection => {
+                                    if let Some(lines) = &self.dag_info.cached_lines {
+                                        let max_scroll = lines.len().saturating_sub(1);
+                                        self.dag_info.vertical_scroll = 
+                                            self.dag_info.vertical_scroll.saturating_add(1).min(max_scroll);
+                                        self.dag_info.vertical_scroll_state = 
+                                            self.dag_info.vertical_scroll_state.position(self.dag_info.vertical_scroll);
+                                    }
+                                }
+                                DagRunFocusedSection::DagRunsTable => {
+                                    self.filtered.next();
+                                }
+                            }
                         }
                         KeyCode::Up | KeyCode::Char('k') => {
-                            self.filtered.previous();
+                            match self.focused_section {
+                                DagRunFocusedSection::InfoSection => {
+                                    self.dag_info.vertical_scroll = self.dag_info.vertical_scroll.saturating_sub(1);
+                                    self.dag_info.vertical_scroll_state = 
+                                        self.dag_info.vertical_scroll_state.position(self.dag_info.vertical_scroll);
+                                }
+                                DagRunFocusedSection::DagRunsTable => {
+                                    self.filtered.previous();
+                                }
+                            }
+                        }
+                        KeyCode::Char('K') => {
+                            // Switch focus to Info section (up)
+                            if self.dag_info.cached_lines.is_some() {
+                                self.focused_section = DagRunFocusedSection::InfoSection;
+                            }
+                        }
+                        KeyCode::Char('J') => {
+                            // Switch focus to DAGRuns table (down)
+                            self.focused_section = DagRunFocusedSection::DagRunsTable;
                         }
                         KeyCode::Char('G') => {
                             self.filtered.state.select_last();
@@ -336,19 +420,64 @@ impl Model for DagRunModel {
 
 impl Widget for &mut DagRunModel {
     fn render(self, area: Rect, buf: &mut ratatui::prelude::Buffer) {
-        let rects = if self.filter.is_enabled() {
+        // Handle filter at bottom if enabled
+        let base_area = if self.filter.is_enabled() {
             let rects = Layout::default()
                 .constraints([Constraint::Fill(90), Constraint::Max(3)].as_ref())
                 .margin(0)
                 .split(area);
-
             self.filter.render(rects[1], buf);
-            rects
+            rects[0]
         } else {
-            Layout::default()
-                .constraints([Constraint::Percentage(100)].as_ref())
-                .margin(0)
-                .split(area)
+            area
+        };
+
+        // Split into Info section and DAGRuns table if info is available
+        let (info_area, dagruns_area) = if self.dag_info.cached_lines.is_some() {
+            let rects = Layout::default()
+                .constraints([Constraint::Length(10), Constraint::Min(0)].as_ref())
+                .split(base_area);
+            (Some(rects[0]), rects[1])
+        } else {
+            (None, base_area)
+        };
+
+        // Render Info section if available
+        if let (Some(info_area), Some(cached_lines)) = (info_area, &self.dag_info.cached_lines) {
+            let border_style = if self.focused_section == DagRunFocusedSection::InfoSection {
+                DEFAULT_STYLE.fg(Color::Cyan) // Highlight when focused
+            } else {
+                DEFAULT_STYLE
+            };
+
+            let info_block = Block::default()
+                .border_type(BorderType::Rounded)
+                .borders(Borders::ALL)
+                .title("Info")
+                .border_style(border_style)
+                .style(DEFAULT_STYLE)
+                .title_style(DEFAULT_STYLE.add_modifier(Modifier::BOLD));
+
+            let info_text = Paragraph::new(cached_lines.clone())
+                .block(info_block)
+                .style(DEFAULT_STYLE)
+                .wrap(Wrap { trim: false })
+                .scroll((self.dag_info.vertical_scroll as u16, 0));
+
+            info_text.render(info_area, buf);
+
+            // Render scrollbar for info section
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓"));
+            scrollbar.render(info_area, buf, &mut self.dag_info.vertical_scroll_state);
+        }
+
+        // Render DAGRuns table
+        let dagruns_border_style = if self.focused_section == DagRunFocusedSection::DagRunsTable {
+            DEFAULT_STYLE.fg(Color::Cyan) // Highlight when focused
+        } else {
+            DEFAULT_STYLE
         };
 
         let headers = ["State", "DAG Run ID", "Logical Date", "Type"];
@@ -408,15 +537,12 @@ impl Widget for &mut DagRunModel {
             Block::default()
                 .border_type(BorderType::Rounded)
                 .borders(Borders::ALL)
-                .title(if let Some(dag_id) = &self.dag_id {
-                    format!("DAGRuns ({dag_id}) - press <?> to see available commands")
-                } else {
-                    "DAGRuns".to_string()
-                })
+                .title("DAGRuns")
+                .border_style(dagruns_border_style)
                 .style(DEFAULT_STYLE),
         )
         .row_highlight_style(DEFAULT_STYLE.reversed());
-        StatefulWidget::render(t, rects[0], buf, &mut self.filtered.state);
+        StatefulWidget::render(t, dagruns_area, buf, &mut self.filtered.state);
 
         if let Some(cached_lines) = &self.dag_code.cached_lines {
             let area = popup_area(area, 60, 90);
@@ -467,6 +593,63 @@ impl Widget for &mut DagRunModel {
             error_popup.render(area, buf);
         }
     }
+}
+
+fn format_dag_info(dag: &crate::airflow::model::common::Dag) -> Vec<Line<'static>> {
+    let mut lines = vec![];
+    
+    // DAG Name
+    let display_name = dag.dag_display_name.as_ref().unwrap_or(&dag.dag_id);
+    lines.push(Line::from(vec![
+        Span::styled("DAG: ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(display_name.to_string()),
+    ]));
+    
+    // Owners
+    if !dag.owners.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("Owners: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(dag.owners.join(", ")),
+        ]));
+    }
+    
+    // Schedule
+    if let Some(schedule) = &dag.timetable_description {
+        lines.push(Line::from(vec![
+            Span::styled("Schedule: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(schedule.to_string()),
+        ]));
+    }
+    
+    // Empty line separator
+    lines.push(Line::from(""));
+    
+    // Documentation
+    lines.push(Line::from(Span::styled(
+        "Documentation:",
+        Style::default().add_modifier(Modifier::BOLD).add_modifier(Modifier::UNDERLINED),
+    )));
+    
+    if let Some(doc_md) = &dag.doc_md {
+        if doc_md.trim().is_empty() {
+            lines.push(Line::from(Span::styled(
+                "No documentation available",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            // Split doc_md into lines
+            for line in doc_md.lines() {
+                lines.push(Line::from(line.to_string()));
+            }
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            "No documentation available",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    
+    lines
 }
 
 fn code_to_lines(dag_code: &str) -> Vec<Line<'static>> {

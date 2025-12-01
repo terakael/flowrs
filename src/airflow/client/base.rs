@@ -31,17 +31,25 @@ impl BaseClient {
         endpoint: &str,
         api_version: &str,
     ) -> Result<reqwest::RequestBuilder> {
-        let base_url = Url::parse(&self.config.endpoint)?;
+        // Ensure base URL ends with a trailing slash for proper path joining
+        let mut base_endpoint = self.config.endpoint.clone();
+        if !base_endpoint.ends_with('/') {
+            base_endpoint.push('/');
+        }
+        
+        let base_url = Url::parse(&base_endpoint)?;
         let url = base_url.join(format!("{api_version}/{endpoint}").as_str())?;
         debug!("🔗 Request URL: {url}");
 
         match &self.config.auth {
             AirflowAuth::Basic(auth) => {
-                info!("🔑 Basic Auth: {}", auth.username);
+                let username = crate::airflow::config::expand_env_vars(&auth.username)?;
+                let password = crate::airflow::config::expand_env_vars(&auth.password)?;
+                info!("🔑 Basic Auth: {}", username);
                 Ok(self
                     .client
                     .request(method, url)
-                    .basic_auth(&auth.username, Some(&auth.password)))
+                    .basic_auth(&username, Some(&password)))
             }
             AirflowAuth::Token(token) => {
                 info!("🔑 Token Auth: {:?}", token.cmd);
@@ -70,7 +78,8 @@ impl BaseClient {
                     Ok(self.client.request(method, url).bearer_auth(token))
                 } else {
                     if let Some(token) = &token.token {
-                        return Ok(self.client.request(method, url).bearer_auth(token.trim()));
+                        let expanded_token = crate::airflow::config::expand_env_vars(token.trim())?;
+                        return Ok(self.client.request(method, url).bearer_auth(expanded_token));
                     }
                     Err(anyhow::anyhow!("Token not found"))
                 }

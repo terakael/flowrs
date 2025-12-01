@@ -14,6 +14,14 @@ use super::managed_services::mwaa::get_mwaa_environment_servers;
 use crate::CONFIG_FILE;
 use anyhow::Result;
 
+/// Expands environment variables in a string value.
+/// Supports ${VAR} and $VAR syntax.
+pub fn expand_env_vars(value: &str) -> Result<String> {
+    shellexpand::env(value)
+        .map(|s| s.into_owned())
+        .map_err(|e| anyhow::anyhow!("Failed to expand environment variable in '{}': {}", value, e))
+}
+
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Default)]
 pub enum AirflowVersion {
     #[default]
@@ -77,16 +85,34 @@ pub enum AirflowAuth {
     Astronomer(super::managed_services::astronomer::AstronomerAuth),
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct BasicAuth {
     pub username: String,
     pub password: String,
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
+impl std::fmt::Debug for BasicAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BasicAuth")
+            .field("username", &self.username)
+            .field("password", &"***redacted***")
+            .finish()
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone)]
 pub struct TokenCmd {
     pub cmd: Option<String>,
     pub token: Option<String>,
+}
+
+impl std::fmt::Debug for TokenCmd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenCmd")
+            .field("cmd", &self.cmd)
+            .field("token", &self.token.as_ref().map(|_| "***redacted***"))
+            .finish()
+    }
 }
 
 impl Default for FlowrsConfig {
@@ -200,12 +226,27 @@ impl FlowrsConfig {
             .path
             .clone()
             .unwrap_or(CONFIG_FILE.as_path().to_path_buf());
+        
+        // Set restrictive file permissions on Unix systems (0600 = rw-------)
+        #[cfg(unix)]
+        let mut file = {
+            use std::os::unix::fs::OpenOptionsExt;
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .truncate(true)
+                .create(true)
+                .mode(0o600)
+                .open(&path)?
+        };
+        
+        #[cfg(not(unix))]
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .truncate(true)
             .create(true)
-            .open(path)?;
+            .open(&path)?;
 
         // Only write non-managed servers to the config file
         if let Some(servers) = &mut self.servers {

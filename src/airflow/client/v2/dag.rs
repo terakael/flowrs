@@ -38,6 +38,19 @@ impl DagOperations for V2Client {
         let dag_source: model::dag::DagSource = response.json().await?;
         Ok(dag_source.content)
     }
+
+    async fn get_dag_details(&self, dag_id: &str) -> Result<crate::airflow::model::common::Dag> {
+        let r = self
+            .base_api(Method::GET, &format!("dags/{}/details", dag_id))?
+            .build()?;
+        let response = self.base.client.execute(r).await?.error_for_status()?;
+        
+        response
+            .json::<model::dag::Dag>()
+            .await
+            .map(std::convert::Into::into)
+            .map_err(std::convert::Into::into)
+    }
 }
 
 #[cfg(test)]

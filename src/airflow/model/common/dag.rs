@@ -10,6 +10,7 @@ pub struct Dag {
     pub dag_id: String,
     pub dag_display_name: Option<String>,
     pub description: Option<String>,
+    pub doc_md: Option<String>,
     pub fileloc: String,
     pub is_paused: bool,
     pub is_active: Option<bool>,
@@ -44,9 +45,10 @@ pub struct Tag {
 impl From<v1::model::dag::DagResponse> for Dag {
     fn from(value: v1::model::dag::DagResponse) -> Self {
         Dag {
-            dag_id: value.dag_id,
-            dag_display_name: Some(value.dag_display_name),
+            dag_id: value.dag_id.clone(),
+            dag_display_name: value.dag_display_name.or(Some(value.dag_id)),
             description: value.description,
+            doc_md: value.doc_md,
             fileloc: value.fileloc,
             is_paused: value.is_paused.unwrap_or(false),
             is_active: value.is_active,
@@ -95,6 +97,7 @@ impl From<v2::model::dag::Dag> for Dag {
             dag_id: value.dag_id,
             dag_display_name: Some(value.dag_display_name),
             description: value.description,
+            doc_md: value.doc_md,
             fileloc: value.fileloc,
             is_paused: value.is_paused,
             is_active: None,

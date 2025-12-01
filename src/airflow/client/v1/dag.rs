@@ -8,7 +8,7 @@ use crate::airflow::{
     traits::DagOperations,
 };
 
-use super::model::dag::DagCollectionResponse;
+use super::model::dag::{DagCollectionResponse, DagResponse};
 
 use super::V1Client;
 
@@ -18,14 +18,20 @@ impl DagOperations for V1Client {
         let r = self.base_api(Method::GET, "dags")?.build()?;
         let response = self.base.client.execute(r).await?.error_for_status()?;
 
-        response
-            .json::<DagCollectionResponse>()
-            .await
-            .map(|daglist| {
+        // Try to get the response text first for better error messages
+        let response_text = response.text().await?;
+        
+        match serde_json::from_str::<DagCollectionResponse>(&response_text) {
+            Ok(daglist) => {
                 info!("DAGs: {daglist:?}");
-                daglist.into()
-            })
-            .map_err(std::convert::Into::into)
+                Ok(daglist.into())
+            }
+            Err(e) => {
+                log::error!("Failed to decode DAG list response. Error: {}", e);
+                log::error!("Response body (first 500 chars): {}", &response_text.chars().take(500).collect::<String>());
+                Err(anyhow::anyhow!("Failed to decode response: {}. Check debug log for response body.", e))
+            }
+        }
     }
 
     async fn toggle_dag(&self, dag_id: &str, is_paused: bool) -> Result<()> {
@@ -46,6 +52,28 @@ impl DagOperations for V1Client {
         let response = self.base.client.execute(r).await?.error_for_status()?;
         let code = response.text().await?;
         Ok(code)
+    }
+
+    async fn get_dag_details(&self, dag_id: &str) -> Result<crate::airflow::model::common::Dag> {
+        let r = self
+            .base_api(Method::GET, &format!("dags/{}/details", dag_id))?
+            .build()?;
+        let response = self.base.client.execute(r).await?.error_for_status()?;
+
+        // Try to get the response text first for better error messages
+        let response_text = response.text().await?;
+        
+        match serde_json::from_str::<DagResponse>(&response_text) {
+            Ok(dag_response) => {
+                info!("DAG details fetched: {dag_id}");
+                Ok(dag_response.into())
+            }
+            Err(e) => {
+                log::error!("Failed to decode DAG details response. Error: {}", e);
+                log::error!("Response body (first 500 chars): {}", &response_text.chars().take(500).collect::<String>());
+                Err(anyhow::anyhow!("Failed to decode DAG details: {}. Check debug log for response body.", e))
+            }
+        }
     }
 }
 

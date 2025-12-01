@@ -72,6 +72,7 @@ impl DagData {
 pub struct EnvironmentData {
     pub client: Arc<dyn AirflowClientTrait>,
     pub dags: HashMap<DagId, DagData>,
+    pub dag_details: HashMap<DagId, Dag>,
 }
 
 impl EnvironmentData {
@@ -79,6 +80,7 @@ impl EnvironmentData {
         Self {
             client,
             dags: HashMap::new(),
+            dag_details: HashMap::new(),
         }
     }
 
@@ -140,6 +142,16 @@ impl EnvironmentData {
                 }
             }
         }
+    }
+
+    /// Get detailed DAG information
+    pub fn get_dag_details(&self, dag_id: &str) -> Option<&Dag> {
+        self.dag_details.get(dag_id)
+    }
+
+    /// Set detailed DAG information
+    pub fn set_dag_details(&mut self, dag_id: String, dag: Dag) {
+        self.dag_details.insert(dag_id, dag);
     }
 }
 
@@ -240,6 +252,20 @@ impl EnvironmentStateContainer {
         self.get_active_environment()
             .and_then(|env| env.get_dag(dag_id))
             .map(|dag_data| dag_data.dag.clone())
+    }
+
+    /// Get detailed DAG information from the active environment
+    pub fn get_active_dag_details(&self, dag_id: &str) -> Option<Dag> {
+        self.get_active_environment()
+            .and_then(|env| env.get_dag_details(dag_id))
+            .cloned()
+    }
+
+    /// Set detailed DAG information in the active environment
+    pub fn set_dag_details(&mut self, dag_id: String, dag: Dag) {
+        if let Some(env) = self.get_active_environment_mut() {
+            env.set_dag_details(dag_id, dag);
+        }
     }
 }
 

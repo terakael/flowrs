@@ -36,6 +36,9 @@ pub enum WorkerMessage {
     GetDagCode {
         dag_id: String,
     },
+    GetDagDetails {
+        dag_id: String,
+    },
     UpdateDagStats {
         clear: bool,
     },
@@ -108,6 +111,14 @@ impl Worker {
             app.loading = true;
         }
 
+        // Handle ConfigSelected BEFORE checking for client (since it creates the client)
+        if let WorkerMessage::ConfigSelected(idx) = message {
+            self.switch_airflow_client(idx);
+            let mut app = self.app.lock().unwrap();
+            app.loading = false;
+            return Ok(());
+        }
+
         // Get the active client from the environment state
         let client = {
             let app = self.app.lock().unwrap();
@@ -150,9 +161,6 @@ impl Worker {
                     let mut app = self.app.lock().unwrap();
                     app.dags.error_popup = Some(ErrorPopup::from_strings(vec![e.to_string()]));
                 }
-            }
-            WorkerMessage::ConfigSelected(idx) => {
-                self.switch_airflow_client(idx);
             }
             WorkerMessage::UpdateDagRuns { dag_id, clear: _ } => {
                 let dag_runs = client.list_dagruns(&dag_id).await;
@@ -227,6 +235,23 @@ impl Worker {
                         Some(ErrorPopup::from_strings(vec!["DAG not found".to_string()]));
                 }
             }
+            WorkerMessage::GetDagDetails { dag_id } => {
+                match client.get_dag_details(&dag_id).await {
+                    Ok(dag_details) => {
+                        let mut app = self.app.lock().unwrap();
+                        // Cache in environment state
+                        app.environment_state.set_dag_details(dag_id.clone(), dag_details.clone());
+                        // Update DAGRuns model
+                        app.dagruns.dag_details = Some(dag_details);
+                        app.dagruns.init_info_scroll();
+                    }
+                    Err(e) => {
+                        log::error!("Failed to fetch DAG details for {}: {}", dag_id, e);
+                        let mut app = self.app.lock().unwrap();
+                        app.dagruns.dag_details = None;
+                    }
+                }
+            }
             WorkerMessage::UpdateDagStats { clear } => {
                 let dag_ids = {
                     let app = self.app.lock().unwrap();
@@ -238,6 +263,16 @@ impl Worker {
                         .collect::<Vec<_>>();
                     dag_ids
                 };
+                
+                // Skip if no DAGs are loaded yet (avoid 404 with empty dag_ids parameter)
+                if dag_ids.is_empty() {
+                    let mut app = self.app.lock().unwrap();
+                    if clear {
+                        app.dags.dag_stats = HashMap::default();
+                    }
+                    return Ok(());
+                }
+                
                 let dag_ids_str: Vec<&str> =
                     dag_ids.iter().map(std::string::String::as_str).collect();
                 let dag_stats = client.get_dag_stats(dag_ids_str).await;
@@ -252,7 +287,10 @@ impl Worker {
                         }
                     }
                     Err(e) => {
-                        app.dags.error_popup = Some(ErrorPopup::from_strings(vec![e.to_string()]));
+                        // dagStats endpoint may not be available in all Airflow versions
+                        // Log the error but don't show popup to user
+                        log::warn!("Failed to fetch DAG stats (this is optional): {}", e);
+                        log::info!("DAG stats will not be available. This is normal for some Airflow versions.");
                     }
                 }
             }
@@ -410,6 +448,11 @@ impl Worker {
                 let url = client.build_open_url(&final_item)?;
                 webbrowser::open(&url).unwrap();
             }
+            // ConfigSelected is handled before the client check above
+            WorkerMessage::ConfigSelected(_) => {
+                // This should never be reached as it's handled earlier
+                unreachable!("ConfigSelected should be handled before client check")
+            }
         }
 
         // Reset loading state at the end
@@ -428,10 +471,25 @@ impl Worker {
 
         // Check if environment already exists, if not create it
         if !app.environment_state.environments.contains_key(&env_name) {
-            if let Ok(client) = crate::airflow::client::create_client(&selected_config) {
-                let env_data = crate::app::environment_state::EnvironmentData::new(client);
-                app.environment_state
-                    .add_environment(env_name.clone(), env_data);
+            match crate::airflow::client::create_client(&selected_config) {
+                Ok(client) => {
+                    let env_data = crate::app::environment_state::EnvironmentData::new(client);
+                    app.environment_state
+                        .add_environment(env_name.clone(), env_data);
+                }
+                Err(e) => {
+                    log::error!("Failed to create client for '{}': {}", env_name, e);
+                    app.configs.error_popup = Some(ErrorPopup::from_strings(vec![
+                        format!("Failed to create client for '{}'", env_name),
+                        format!("Error: {}", e),
+                        String::new(),
+                        "Common causes:".to_string(),
+                        "- Missing environment variable (check ${VAR_NAME} in ~/.flowrs)".to_string(),
+                        "- Invalid endpoint URL".to_string(),
+                        "- Network connectivity issues".to_string(),
+                    ]));
+                    return;
+                }
             }
         }
 

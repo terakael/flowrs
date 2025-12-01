@@ -33,6 +33,8 @@ pub struct Dag {
     pub relative_fileloc: Option<String>,
     pub fileloc: String,
     pub description: Option<String>,
+    #[serde(default)]
+    pub doc_md: Option<String>,
     #[serde(rename = "timetable_summary")]
     pub timetable_summary: Option<String>,
     #[serde(rename = "timetable_description")]

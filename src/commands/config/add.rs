@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 use inquire::Select;
-use log::info;
 use strum::IntoEnumIterator;
 
 use super::model::AddCommand;
@@ -34,41 +33,58 @@ impl AddCommand {
 
         let new_config = match auth_type {
             ConfigOption::BasicAuth => {
-                let username = inquire::Text::new("username").prompt()?;
-                let password = inquire::Password::new("password")
-                    .with_display_toggle_enabled()
+                println!("\n📝 Enter environment variable names for credentials.");
+                println!("   These will be expanded at runtime (e.g., AIRFLOW_USERNAME, AIRFLOW_PASSWORD)");
+                println!("   You can use ${{VAR}} or $VAR syntax, or just the variable name.\n");
+                
+                let username = inquire::Text::new("username environment variable")
+                    .with_placeholder("AIRFLOW_USERNAME")
+                    .prompt()?;
+                let password = inquire::Text::new("password environment variable")
+                    .with_placeholder("AIRFLOW_PASSWORD")
                     .prompt()?;
 
                 AirflowConfig {
                     name,
                     endpoint,
-                    auth: AirflowAuth::Basic(BasicAuth { username, password }),
+                    auth: AirflowAuth::Basic(BasicAuth { 
+                        username: format!("${{{}}}", username.trim_start_matches('$').trim_start_matches('{').trim_end_matches('}')),
+                        password: format!("${{{}}}", password.trim_start_matches('$').trim_start_matches('{').trim_end_matches('}')),
+                    }),
                     managed: None,
                     version,
                 }
             }
             ConfigOption::Token(_) => {
-                let cmd = Some(inquire::Text::new("cmd").prompt()?);
-                let token: String;
-                if let Some(cmd) = &cmd {
-                    info!("🔑 Running command: {cmd}");
-                    let output = std::process::Command::new("sh")
-                        .arg("-c")
-                        .arg(cmd)
-                        .output()
-                        .expect("failed to execute process");
-                    token = String::from_utf8(output.stdout)?;
-                } else {
-                    token = inquire::Text::new("token").prompt()?;
-                }
+                println!("\n📝 Choose token authentication method:");
+                println!("   1. Command: Execute a shell command to get the token (e.g., 'echo $TOKEN')");
+                println!("   2. Environment variable: Reference an environment variable (e.g., AIRFLOW_TOKEN)\n");
+                
+                let token_method = inquire::Select::new(
+                    "token method",
+                    vec!["Command", "Environment Variable"]
+                ).prompt()?;
+
+                let (cmd, token) = match token_method {
+                    "Command" => {
+                        let cmd = inquire::Text::new("command")
+                            .with_placeholder("echo $AIRFLOW_TOKEN")
+                            .prompt()?;
+                        (Some(cmd), None)
+                    }
+                    _ => {
+                        let var_name = inquire::Text::new("token environment variable")
+                            .with_placeholder("AIRFLOW_TOKEN")
+                            .prompt()?;
+                        let formatted_var = format!("${{{}}}", var_name.trim_start_matches('$').trim_start_matches('{').trim_end_matches('}'));
+                        (None, Some(formatted_var))
+                    }
+                };
 
                 AirflowConfig {
                     name,
                     endpoint,
-                    auth: AirflowAuth::Token(TokenCmd {
-                        cmd,
-                        token: Some(token),
-                    }),
+                    auth: AirflowAuth::Token(TokenCmd { cmd, token }),
                     managed: None,
                     version,
                 }

@@ -29,6 +29,16 @@ pub static DAGRUN_COMMAND_POP_UP: LazyLock<CommandPopUp> = LazyLock::new(|| {
             key_binding: "t",
             description: "Trigger a DAG run",
         },
+        Command {
+            name: "Focus Info",
+            key_binding: "Shift+K",
+            description: "Focus Info section (up)",
+        },
+        Command {
+            name: "Focus Table",
+            key_binding: "Shift+J",
+            description: "Focus DAGRuns table (down)",
+        },
     ];
     commands.append(&mut DefaultCommands::new().0);
     CommandPopUp {

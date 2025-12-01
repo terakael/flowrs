@@ -78,7 +78,16 @@ pub fn validate_endpoint(
     endpoint: &str,
 ) -> Result<Validation, Box<dyn std::error::Error + Send + Sync>> {
     match Url::parse(endpoint) {
-        Ok(_) => Ok(Validation::Valid),
+        Ok(url) => {
+            // Check if URL contains api/v1 or api/v2 which shouldn't be in the base endpoint
+            if url.path().contains("/api/v1") || url.path().contains("/api/v2") {
+                Ok(Validation::Invalid(
+                    "⚠️ Endpoint should not include '/api/v1' or '/api/v2' - these are added automatically.\nExample: Use 'https://airflow.example.com/subpath' instead of 'https://airflow.example.com/subpath/api/v1'".into()
+                ))
+            } else {
+                Ok(Validation::Valid)
+            }
+        }
         Err(error) => Ok(Validation::Invalid(error.into())),
     }
 }

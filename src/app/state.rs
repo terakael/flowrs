@@ -102,9 +102,15 @@ impl App {
                 self.dags.filter_dags();
             }
             Panel::DAGRun => {
-                if let Some(dag_id) = &self.dagruns.dag_id {
+                if let Some(dag_id) = &self.dagruns.dag_id.clone() {
                     self.dagruns.all = self.environment_state.get_active_dag_runs(dag_id);
                     self.dagruns.filter_dag_runs();
+                    
+                    // Sync cached DAG details
+                    if let Some(dag_details) = self.environment_state.get_active_dag_details(dag_id) {
+                        self.dagruns.dag_details = Some(dag_details);
+                        self.dagruns.init_info_scroll();
+                    }
                 } else {
                     self.dagruns.all.clear();
                 }

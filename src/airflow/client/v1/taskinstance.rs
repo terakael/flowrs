@@ -33,9 +33,18 @@ impl TaskInstanceOperations for V1Client {
                 .await?
                 .error_for_status()?;
 
-            let page: model::taskinstance::TaskInstanceCollectionResponse = response
-                .json::<model::taskinstance::TaskInstanceCollectionResponse>()
-                .await?;
+            // Get response text for better error messages
+            let response_text = response.text().await?;
+            
+            let page: model::taskinstance::TaskInstanceCollectionResponse = 
+                match serde_json::from_str(&response_text) {
+                    Ok(page) => page,
+                    Err(e) => {
+                        log::error!("Failed to decode task instances response. Error: {}", e);
+                        log::error!("Response body (first 500 chars): {}", &response_text.chars().take(500).collect::<String>());
+                        return Err(anyhow::anyhow!("Failed to decode task instances: {}. Check debug log for details.", e));
+                    }
+                };
 
             total_entries = page.total_entries;
             let fetched_count = page.task_instances.len();

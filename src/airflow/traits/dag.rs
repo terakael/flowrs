@@ -14,4 +14,7 @@ pub trait DagOperations: Send + Sync {
 
     /// Get DAG source code (uses `file_token` in v1, `dag_id` in v2)
     async fn get_dag_code(&self, dag: &Dag) -> Result<String>;
+
+    /// Get detailed DAG information including doc_md
+    async fn get_dag_details(&self, dag_id: &str) -> Result<Dag>;
 }

@@ -142,10 +142,19 @@ pub struct MwaaWebToken {
 }
 
 /// MWAA authentication data including session cookie
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct MwaaAuth {
     pub session_cookie: String,
     pub environment_name: String,
+}
+
+impl std::fmt::Debug for MwaaAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MwaaAuth")
+            .field("session_cookie", &"***redacted***")
+            .field("environment_name", &self.environment_name)
+            .finish()
+    }
 }
 
 #[derive(Serialize)]

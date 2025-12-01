@@ -38,7 +38,13 @@ impl AirflowClient for V2Client {
     }
 
     fn build_open_url(&self, item: &OpenItem) -> Result<String> {
-        let mut base_url = Url::parse(&self.base.config.endpoint)?;
+        // Ensure base URL ends with a trailing slash for proper path joining
+        let mut base_endpoint = self.base.config.endpoint.clone();
+        if !base_endpoint.ends_with('/') {
+            base_endpoint.push('/');
+        }
+        
+        let mut base_url = Url::parse(&base_endpoint)?;
 
         match item {
             OpenItem::Config(config_endpoint) => {
