@@ -70,12 +70,16 @@ impl DagModel {
     pub fn filter_dags(&mut self) {
         let prefix = &self.filter.prefix;
         
-        // Step 1: Filter by text search and active status
+        // Step 1: Filter by text search (DAG name or tags) and active status
         let mut filtered_dags: Vec<Dag> = match prefix {
             Some(prefix) => self
                 .all
                 .iter()
-                .filter(|dag| dag.dag_id.contains(prefix) && dag.is_active.unwrap_or(false))
+                .filter(|dag| {
+                    let matches_name = dag.dag_id.contains(prefix);
+                    let matches_tag = dag.tags.iter().any(|tag| tag.name.contains(prefix));
+                    (matches_name || matches_tag) && dag.is_active.unwrap_or(false)
+                })
                 .cloned()
                 .collect(),
             None => self.all.iter().filter(|dag| dag.is_active.unwrap_or(false)).cloned().collect(),
