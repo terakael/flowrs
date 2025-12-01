@@ -410,7 +410,19 @@ impl Model for DagModel {
                             }
                         }
                         KeyCode::Char('G') => {
-                            self.filtered.state.select_last();
+                            // Jump to bottom of focused section
+                            match self.focused_section {
+                                DagFocusedSection::ImportErrors => {
+                                    if let Some(cached_lines) = &self.import_errors.cached_lines {
+                                        self.import_errors.vertical_scroll = cached_lines.len().saturating_sub(1);
+                                        self.import_errors.vertical_scroll_state = 
+                                            self.import_errors.vertical_scroll_state.position(self.import_errors.vertical_scroll);
+                                    }
+                                }
+                                DagFocusedSection::DagTable => {
+                                    self.filtered.state.select_last();
+                                }
+                            }
                         }
                         KeyCode::Char('p') => {
                             // Toggle showing paused DAGs
@@ -479,7 +491,17 @@ impl Model for DagModel {
                         KeyCode::Char('g') => {
                             if let Some(FlowrsEvent::Key(key_event)) = self.event_buffer.pop() {
                                 if key_event.code == KeyCode::Char('g') {
-                                    self.filtered.state.select_first();
+                                    // Jump to top of focused section
+                                    match self.focused_section {
+                                        DagFocusedSection::ImportErrors => {
+                                            self.import_errors.vertical_scroll = 0;
+                                            self.import_errors.vertical_scroll_state = 
+                                                self.import_errors.vertical_scroll_state.position(0);
+                                        }
+                                        DagFocusedSection::DagTable => {
+                                            self.filtered.state.select_first();
+                                        }
+                                    }
                                 } else {
                                     self.event_buffer.push(FlowrsEvent::Key(key_event));
                                 }

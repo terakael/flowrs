@@ -320,12 +320,34 @@ impl Model for DagRunModel {
                             self.focused_section = DagRunFocusedSection::DagRunsTable;
                         }
                         KeyCode::Char('G') => {
-                            self.filtered.state.select_last();
+                            // Jump to bottom of focused section
+                            match self.focused_section {
+                                DagRunFocusedSection::InfoSection => {
+                                    if let Some(lines) = &self.dag_info.cached_lines {
+                                        self.dag_info.vertical_scroll = lines.len().saturating_sub(1);
+                                        self.dag_info.vertical_scroll_state = 
+                                            self.dag_info.vertical_scroll_state.position(self.dag_info.vertical_scroll);
+                                    }
+                                }
+                                DagRunFocusedSection::DagRunsTable => {
+                                    self.filtered.state.select_last();
+                                }
+                            }
                         }
                         KeyCode::Char('g') => {
                             if let Some(FlowrsEvent::Key(key_event)) = self.event_buffer.pop() {
                                 if key_event.code == KeyCode::Char('g') {
-                                    self.filtered.state.select_first();
+                                    // Jump to top of focused section
+                                    match self.focused_section {
+                                        DagRunFocusedSection::InfoSection => {
+                                            self.dag_info.vertical_scroll = 0;
+                                            self.dag_info.vertical_scroll_state = 
+                                                self.dag_info.vertical_scroll_state.position(0);
+                                        }
+                                        DagRunFocusedSection::DagRunsTable => {
+                                            self.filtered.state.select_first();
+                                        }
+                                    }
                                 } else {
                                     self.event_buffer.push(FlowrsEvent::Key(key_event));
                                 }
