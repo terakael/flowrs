@@ -70,18 +70,20 @@ impl DagModel {
     pub fn filter_dags(&mut self) {
         let prefix = &self.filter.prefix;
         
-        // Step 1: Filter by text search (DAG name or tags) and active status
+        // Step 1: Filter by text search (DAG name or tags) and active status (case-insensitive)
         let mut filtered_dags: Vec<Dag> = match prefix {
-            Some(prefix) => self
-                .all
-                .iter()
-                .filter(|dag| {
-                    let matches_name = dag.dag_id.contains(prefix);
-                    let matches_tag = dag.tags.iter().any(|tag| tag.name.contains(prefix));
-                    (matches_name || matches_tag) && dag.is_active.unwrap_or(false)
-                })
-                .cloned()
-                .collect(),
+            Some(prefix) => {
+                let lower_prefix = prefix.to_lowercase();
+                self.all
+                    .iter()
+                    .filter(|dag| {
+                        let matches_name = dag.dag_id.to_lowercase().contains(&lower_prefix);
+                        let matches_tag = dag.tags.iter().any(|tag| tag.name.to_lowercase().contains(&lower_prefix));
+                        (matches_name || matches_tag) && dag.is_active.unwrap_or(false)
+                    })
+                    .cloned()
+                    .collect()
+            }
             None => self.all.iter().filter(|dag| dag.is_active.unwrap_or(false)).cloned().collect(),
         };
         
@@ -206,6 +208,58 @@ fn tag_to_color(tag_name: &str) -> Color {
     let hash = hasher.finish();
     
     TAG_COLORS[(hash as usize) % TAG_COLORS.len()]
+}
+
+/// Highlight search term occurrences in text with yellow background
+/// Returns a Vec of Spans with matching parts highlighted (case-insensitive search)
+fn highlight_search_term<'a>(
+    text: &'a str,
+    search: Option<&str>,
+    base_color: Color,
+) -> Vec<Span<'a>> {
+    let Some(search) = search else {
+        return vec![Span::styled(text, Style::default().fg(base_color))];
+    };
+    
+    if search.is_empty() {
+        return vec![Span::styled(text, Style::default().fg(base_color))];
+    }
+    
+    let mut spans = Vec::new();
+    let lower_text = text.to_lowercase();
+    let lower_search = search.to_lowercase();
+    let mut last_end = 0;
+    
+    // Find all occurrences (case-insensitive)
+    for (idx, _) in lower_text.match_indices(&lower_search) {
+        // Add non-matching part
+        if idx > last_end {
+            spans.push(Span::styled(
+                &text[last_end..idx],
+                Style::default().fg(base_color),
+            ));
+        }
+        
+        // Add highlighted matching part with yellow background
+        spans.push(Span::styled(
+            &text[idx..idx + search.len()],
+            Style::default()
+                .fg(base_color)
+                .bg(crate::ui::constants::BRIGHT_YELLOW),
+        ));
+        
+        last_end = idx + search.len();
+    }
+    
+    // Add remaining text
+    if last_end < text.len() {
+        spans.push(Span::styled(
+            &text[last_end..],
+            Style::default().fg(base_color),
+        ));
+    }
+    
+    spans
 }
 
 impl Model for DagModel {
@@ -383,6 +437,7 @@ impl Widget for &mut DagModel {
         let header = Row::new(header_row)
             .style(DEFAULT_STYLE.reversed())
             .add_modifier(Modifier::BOLD);
+        let search_term = self.filter.prefix.as_deref();
         let rows =
             self.filtered.items.iter().enumerate().map(|(idx, item)| {
                 // Determine DAG color based on recent runs
@@ -390,7 +445,7 @@ impl Widget for &mut DagModel {
                 
                 Row::new(vec![
                     Line::from(Span::styled("■", Style::default().fg(color))),
-                    Line::from(item.dag_id.as_str()),
+                    Line::from(highlight_search_term(&item.dag_id, search_term, Color::Reset)),
                     {
                         let schedule = item.timetable_description.as_deref().unwrap_or("None");
                         // Shorten "Never, external triggers only" to just "Never"
@@ -417,14 +472,16 @@ impl Widget for &mut DagModel {
                         if item.tags.is_empty() {
                             Line::from("")
                         } else {
-                            // Create colored spans for each tag
+                            // Create colored spans for each tag with search highlighting
                             let mut spans = Vec::new();
                             for (i, tag) in item.tags.iter().enumerate() {
                                 if i > 0 {
                                     spans.push(Span::raw(", "));
                                 }
-                                let color = tag_to_color(&tag.name);
-                                spans.push(Span::styled(&tag.name, Style::default().fg(color)));
+                                let tag_color = tag_to_color(&tag.name);
+                                // Apply highlighting while preserving tag color
+                                let highlighted_spans = highlight_search_term(&tag.name, search_term, tag_color);
+                                spans.extend(highlighted_spans);
                             }
                             Line::from(spans)
                         }
