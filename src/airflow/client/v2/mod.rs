@@ -7,6 +7,7 @@ mod log;
 mod taskinstance;
 
 use anyhow::Result;
+use async_trait::async_trait;
 use reqwest::Method;
 use url::{form_urlencoded, Url};
 
@@ -32,9 +33,22 @@ impl V2Client {
     }
 }
 
+#[async_trait]
 impl AirflowClient for V2Client {
     fn get_version(&self) -> AirflowVersion {
         AirflowVersion::V3
+    }
+    
+    async fn get_import_error_count(&self) -> Result<usize> {
+        let response = self
+            .base_api(Method::GET, "importErrors")?
+            .query(&[("limit", "1")])
+            .send()
+            .await?
+            .error_for_status()?;
+            
+        let result: model::importerror::ImportErrorCollection = response.json().await?;
+        Ok(result.total_entries as usize)
     }
 
     fn build_open_url(&self, item: &OpenItem) -> Result<String> {

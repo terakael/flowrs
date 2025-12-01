@@ -19,7 +19,9 @@ pub struct Worker {
 #[derive(Debug)]
 pub enum WorkerMessage {
     ConfigSelected(usize),
-    UpdateDags,
+    UpdateDags {
+        only_active: bool,
+    },
     ToggleDag {
         dag_id: String,
         is_paused: bool,
@@ -42,6 +44,7 @@ pub enum WorkerMessage {
     UpdateDagStats {
         clear: bool,
     },
+    UpdateImportErrors,
     ClearDagRun {
         dag_run_id: String,
         dag_id: String,
@@ -136,11 +139,16 @@ impl Worker {
         }
         let client = client.unwrap();
         match message {
-            WorkerMessage::UpdateDags => {
-                let dag_list = client.list_dags().await;
+            WorkerMessage::UpdateDags { only_active } => {
+                let dag_list = client.list_dags(only_active).await;
                 let mut app = self.app.lock().unwrap();
                 match dag_list {
                     Ok(dag_list) => {
+                        debug!("Received {} DAGs from API (only_active: {})", dag_list.dags.len(), only_active);
+                        let active_count = dag_list.dags.iter().filter(|d| !d.is_paused).count();
+                        let paused_count = dag_list.dags.iter().filter(|d| d.is_paused).count();
+                        debug!("  Active: {}, Paused: {}", active_count, paused_count);
+                        
                         // Store DAGs in the environment state
                         if let Some(env) = app.environment_state.get_active_environment_mut() {
                             for dag in &dag_list.dags {
@@ -413,6 +421,11 @@ impl Worker {
                     let mut app = self.app.lock().unwrap();
                     app.dagruns.error_popup = Some(ErrorPopup::from_strings(vec![e.to_string()]));
                 }
+            }
+            WorkerMessage::UpdateImportErrors => {
+                let import_error_count = client.get_import_error_count().await.unwrap_or(0);
+                let mut app = self.app.lock().unwrap();
+                app.dags.import_error_count = import_error_count;
             }
             WorkerMessage::OpenItem(item) => {
                 // For Config items, look up the endpoint from active_server instead of using the passed string

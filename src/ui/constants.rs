@@ -32,6 +32,14 @@ pub const DEFAULT_STYLE: Style = Style {
     sub_modifier: Modifier::empty(),
 };
 
+pub const SELECTED_STYLE: Style = Style {
+    fg: Some(Color::Black),
+    bg: Some(GREEN),
+    underline_color: None,
+    add_modifier: Modifier::BOLD,
+    sub_modifier: Modifier::empty(),
+};
+
 pub const ALTERNATING_ROW_COLOR: Color = Color::Rgb(0x2d, 0x2b, 0x29); // Slightly lighter than background
 pub const MARKED_COLOR: Color = YELLOW; // Use theme yellow for marked items
 

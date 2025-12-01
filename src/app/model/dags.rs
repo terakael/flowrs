@@ -20,11 +20,21 @@ use super::popup::error::ErrorPopup;
 use super::{filter::Filter, Model, StatefulTable};
 use crate::app::worker::{OpenItem, WorkerMessage};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DagStatus {
+    Failed,    // Highest priority (sort first)
+    Running,
+    Idle,
+    Paused,    // Lowest priority (sort last)
+}
+
 pub struct DagModel {
     pub all: Vec<Dag>,
     pub dag_stats: HashMap<String, Vec<DagStatistic>>,
     pub filtered: StatefulTable<Dag>,
     pub filter: Filter,
+    pub show_paused: bool,
+    pub import_error_count: usize,
     commands: Option<&'static CommandPopUp<'static>>,
     pub error_popup: Option<ErrorPopup>,
     ticks: u32,
@@ -38,6 +48,8 @@ impl DagModel {
             dag_stats: HashMap::new(),
             filtered: StatefulTable::new(vec![]),
             filter: Filter::new(),
+            show_paused: false,
+            import_error_count: 0,
             ticks: 0,
             commands: None,
             error_popup: None,
@@ -47,16 +59,29 @@ impl DagModel {
 
     pub fn filter_dags(&mut self) {
         let prefix = &self.filter.prefix;
-        let filtered_dags = match prefix {
-            Some(prefix) => &self
+        
+        // Step 1: Filter by text search and active status
+        let mut filtered_dags: Vec<Dag> = match prefix {
+            Some(prefix) => self
                 .all
                 .iter()
-                .filter(|dag| dag.dag_id.contains(prefix))
+                .filter(|dag| dag.dag_id.contains(prefix) && dag.is_active.unwrap_or(false))
                 .cloned()
-                .collect::<Vec<Dag>>(),
-            None => &self.all,
+                .collect(),
+            None => self.all.iter().filter(|dag| dag.is_active.unwrap_or(false)).cloned().collect(),
         };
-        self.filtered.items = filtered_dags.clone();
+        
+        // Step 2: Filter by pause state
+        if !self.show_paused {
+            filtered_dags.retain(|dag| !dag.is_paused);
+        }
+        
+        // Step 3: Sort alphabetically by name
+        filtered_dags.sort_by(|a, b| {
+            a.dag_id.cmp(&b.dag_id)
+        });
+        
+        self.filtered.items = filtered_dags;
     }
 
     pub fn current(&mut self) -> Option<&mut Dag> {
@@ -67,6 +92,26 @@ impl DagModel {
     }
     pub fn get_dag_by_id(&self, dag_id: &str) -> Option<&Dag> {
         self.all.iter().find(|dag| dag.dag_id == dag_id)
+    }
+
+    fn get_dag_status(&self, dag: &Dag) -> DagStatus {
+        if dag.is_paused {
+            return DagStatus::Paused;
+        }
+        
+        if let Some(stats) = self.dag_stats.get(&dag.dag_id) {
+            let has_failed = stats.iter().any(|s| s.state == "failed" && s.count > 0);
+            let has_running = stats.iter().any(|s| s.state == "running" && s.count > 0);
+            
+            if has_failed {
+                return DagStatus::Failed;
+            }
+            if has_running {
+                return DagStatus::Running;
+            }
+        }
+        
+        DagStatus::Idle
     }
 }
 
@@ -87,8 +132,11 @@ impl Model for DagModel {
                 (
                     Some(FlowrsEvent::Tick),
                     vec![
-                        WorkerMessage::UpdateDags,
+                        WorkerMessage::UpdateDags {
+                            only_active: !self.show_paused,
+                        },
                         WorkerMessage::UpdateDagStats { clear: true },
+                        WorkerMessage::UpdateImportErrors,
                     ],
                 )
             }
@@ -123,24 +171,42 @@ impl Model for DagModel {
                         KeyCode::Char('G') => {
                             self.filtered.state.select_last();
                         }
-                        KeyCode::Char('p') => match self.current() {
-                            Some(dag) => {
-                                let current_state = dag.is_paused;
-                                dag.is_paused = !current_state;
-                                return (
-                                    None,
-                                    vec![WorkerMessage::ToggleDag {
-                                        dag_id: dag.dag_id.clone(),
-                                        is_paused: current_state,
-                                    }],
-                                );
+                        KeyCode::Char('p') => {
+                            // Toggle showing paused DAGs
+                            self.show_paused = !self.show_paused;
+                            self.filter_dags();
+                            // Refresh from API with new only_active filter
+                            return (
+                                None,
+                                vec![
+                                    WorkerMessage::UpdateDags {
+                                        only_active: !self.show_paused,
+                                    },
+                                    WorkerMessage::UpdateDagStats { clear: true },
+                                ],
+                            );
+                        }
+                        KeyCode::Char('P') => {
+                            // Pause/unpause the selected DAG (Shift+P)
+                            match self.current() {
+                                Some(dag) => {
+                                    let current_state = dag.is_paused;
+                                    dag.is_paused = !current_state;
+                                    return (
+                                        None,
+                                        vec![WorkerMessage::ToggleDag {
+                                            dag_id: dag.dag_id.clone(),
+                                            is_paused: current_state,
+                                        }],
+                                    );
+                                }
+                                None => {
+                                    self.error_popup = Some(ErrorPopup::from_strings(vec![
+                                        "No DAG selected to pause/resume".to_string(),
+                                    ]));
+                                }
                             }
-                            None => {
-                                self.error_popup = Some(ErrorPopup::from_strings(vec![
-                                    "No DAG selected to pause/resume".to_string(),
-                                ]));
-                            }
-                        },
+                        }
                         KeyCode::Char('/') => {
                             self.filter.toggle();
                             self.filter_dags();
@@ -222,9 +288,9 @@ impl Widget for &mut DagModel {
                 .margin(0)
                 .split(area)
         };
-        let selected_style = DEFAULT_STYLE.add_modifier(Modifier::REVERSED);
+        let selected_style = crate::ui::constants::SELECTED_STYLE;
 
-        let headers = ["Active", "Name", "Owners", "Schedule", "Next Run", "Stats"];
+        let headers = ["Name", "Schedule", "Next Run", "Tags"];
         let header_row = create_headers(headers);
         let header = Row::new(header_row)
             .style(DEFAULT_STYLE.reversed())
@@ -232,53 +298,44 @@ impl Widget for &mut DagModel {
         let rows =
             self.filtered.items.iter().enumerate().map(|(idx, item)| {
                 Row::new(vec![
-                    if item.is_paused {
-                        Line::from(Span::styled("🔘", Style::default()))
-                    } else {
-                        Line::from(Span::styled("🔵", Style::default()))
+                    {
+                        // Determine DAG name color based on status
+                        let status = self.get_dag_status(item);
+                        let name_style = match status {
+                            DagStatus::Failed => Style::default()
+                                .fg(Color::Red)
+                                .add_modifier(Modifier::BOLD),
+                            DagStatus::Running => Style::default()
+                                .fg(Color::Green)
+                                .add_modifier(Modifier::BOLD),
+                            DagStatus::Paused => Style::default()
+                                .fg(Color::DarkGray)
+                                .add_modifier(Modifier::BOLD),
+                            DagStatus::Idle => Style::default()
+                                .add_modifier(Modifier::BOLD),
+                        };
+                        Line::from(Span::styled(item.dag_id.as_str(), name_style))
                     },
-                    Line::from(Span::styled(
-                        item.dag_id.as_str(),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    )),
-                    Line::from(item.owners.join(", ")),
-                    Line::from(item.timetable_description.as_deref().unwrap_or("None"))
-                        .style(Style::default().fg(Color::LightYellow)),
+                    Line::from({
+                        let schedule = item.timetable_description.as_deref().unwrap_or("None");
+                        // Shorten "Never, external triggers only" to just "Never"
+                        if schedule.starts_with("Never") {
+                            "Never"
+                        } else {
+                            schedule
+                        }
+                    })
+                    .style(Style::default().fg(Color::LightYellow)),
                     Line::from(if let Some(date) = item.next_dagrun_create_after {
                         convert_datetimeoffset_to_human_readable_remaining_time(date)
                     } else {
                         "None".to_string()
                     }),
-                    Line::from(self.dag_stats.get(&item.dag_id).map_or_else(
-                        || vec![Span::styled("None".to_string(), Style::default())],
-                        |stats| {
-                            stats
-                                .iter()
-                                .map(|stat| {
-                                    Span::styled(
-                                        left_pad::leftpad(stat.count.to_string(), 7),
-                                        match stat.state.as_str() {
-                                            "success" => Style::default()
-                                                .fg(AirflowStateColor::Success.into()),
-                                            "running" if stat.count > 0 => Style::default()
-                                                .fg(AirflowStateColor::Running.into()),
-                                            "failed" if stat.count > 0 => Style::default()
-                                                .fg(AirflowStateColor::Failed.into()),
-                                            "queued" => Style::default()
-                                                .fg(AirflowStateColor::Queued.into()),
-                                            "up_for_retry" => Style::default()
-                                                .fg(AirflowStateColor::UpForRetry.into()),
-                                            "upstream_failed" => Style::default()
-                                                .fg(AirflowStateColor::UpstreamFailed.into()),
-                                            _ => {
-                                                Style::default().fg(AirflowStateColor::None.into())
-                                            }
-                                        },
-                                    )
-                                })
-                                .collect::<Vec<Span>>()
-                        },
-                    )),
+                    Line::from(if item.tags.is_empty() {
+                        "".to_string()
+                    } else {
+                        item.tags.iter().map(|tag| tag.name.as_str()).collect::<Vec<_>>().join(", ")
+                    }),
                 ])
                 .style(if (idx % 2) == 0 {
                     DEFAULT_STYLE
@@ -289,12 +346,10 @@ impl Widget for &mut DagModel {
         let t = Table::new(
             rows,
             &[
-                Constraint::Length(6),
                 Constraint::Fill(2),
-                Constraint::Max(20),
                 Constraint::Length(10),
                 Constraint::Length(10),
-                Constraint::Length(30),
+                Constraint::Fill(1),
             ],
         )
         .header(header)
@@ -302,7 +357,19 @@ impl Widget for &mut DagModel {
             Block::default()
                 .border_type(BorderType::Rounded)
                 .borders(Borders::ALL)
-                .title("DAGs - Press <?> to see available commands")
+                .title({
+                    // Calculate stats for active DAGs only
+                    let active_dags: Vec<_> = self.all.iter().filter(|d| d.is_active.unwrap_or(false)).collect();
+                    let total_dags = active_dags.len();
+                    let paused_dags = active_dags.iter().filter(|d| d.is_paused).count();
+                    let unpaused_dags = total_dags - paused_dags;
+                    
+                    let mode = if self.show_paused { "All" } else { "Active Only" };
+                    format!(
+                        "DAGs ({}) - {}/{} Unpaused, {} Import Errors - Press <?> for commands",
+                        mode, unpaused_dags, total_dags, self.import_error_count
+                    )
+                })
                 .border_style(DEFAULT_STYLE)
                 .style(DEFAULT_STYLE),
         )

@@ -1,23 +1,60 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use log::{debug, info};
 use reqwest::Method;
 
-use crate::airflow::{model::common::DagList, traits::DagOperations};
 use super::model;
+use crate::airflow::{model::common::DagList, traits::DagOperations};
 
 use super::V2Client;
 
 #[async_trait]
 impl DagOperations for V2Client {
-    async fn list_dags(&self) -> Result<DagList> {
-        let r = self.base_api(Method::GET, "dags")?.build()?;
-        let response = self.base.client.execute(r).await?.error_for_status()?;
+    async fn list_dags(&self, only_active: bool) -> Result<DagList> {
+        // Fetch all DAGs using pagination
+        // Note: only_active filters by is_active (scheduler visibility), not is_paused
+        // Since we want to filter by pause state, we fetch all DAGs and filter locally
+        debug!("list_dags called with only_active={}, fetching all DAGs with pagination", only_active);
+        
+        let mut all_dags = Vec::new();
+        let mut offset = 0;
+        let limit = 100; // API seems to have a max limit of 100
+        let mut total_entries = 0;
+        
+        loop {
+            let response = self
+                .base_api(Method::GET, "dags")?
+                .query(&[
+                    ("limit", limit.to_string()),
+                    ("offset", offset.to_string()),
+                    ("only_active", "false".to_string())
+                ])
+                .send()
+                .await?
+                .error_for_status()?;
 
-        response
-            .json::<model::dag::DagList>()
-            .await
-            .map(std::convert::Into::into)
-            .map_err(std::convert::Into::into)
+            let page: model::dag::DagList = response.json().await?;
+            
+            total_entries = page.total_entries;
+            let fetched_count = page.dags.len();
+            all_dags.extend(page.dags);
+            
+            debug!("Fetched {} DAGs at offset {}, total so far: {}/{}", fetched_count, offset, all_dags.len(), total_entries);
+            
+            // Break if we've fetched all DAGs or got fewer than limit (last page)
+            if all_dags.len() >= total_entries as usize || fetched_count < limit {
+                break;
+            }
+            
+            offset += limit;
+        }
+        
+        info!("DAGs fetched: {} out of {} total (only_active: {})", all_dags.len(), total_entries, only_active);
+        
+        Ok(DagList { 
+            dags: all_dags.into_iter().map(|d| d.into()).collect(),
+            total_entries,
+        })
     }
 
     async fn toggle_dag(&self, dag_id: &str, is_paused: bool) -> Result<()> {
@@ -82,7 +119,7 @@ mod tests {
         }
 
         let client = get_test_client();
-        let daglist: DagList = client.list_dags().await.unwrap();
+        let daglist: DagList = client.list_dags(false).await.unwrap();
         assert!(!daglist.dags.is_empty());
     }
 
@@ -95,7 +132,7 @@ mod tests {
         }
 
         let client = get_test_client();
-        let daglist: DagList = client.list_dags().await.unwrap();
+        let daglist: DagList = client.list_dags(false).await.unwrap();
         let dag = &daglist.dags[0];
         let code = client.get_dag_code(dag).await.unwrap();
         assert!(code.contains(&dag.dag_id));

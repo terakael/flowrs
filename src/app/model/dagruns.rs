@@ -541,7 +541,7 @@ impl Widget for &mut DagRunModel {
                 .border_style(dagruns_border_style)
                 .style(DEFAULT_STYLE),
         )
-        .row_highlight_style(DEFAULT_STYLE.reversed());
+        .row_highlight_style(crate::ui::constants::SELECTED_STYLE);
         StatefulWidget::render(t, dagruns_area, buf, &mut self.filtered.state);
 
         if let Some(cached_lines) = &self.dag_code.cached_lines {

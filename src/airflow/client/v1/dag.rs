@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use log::info;
+use log::{debug, info};
 use reqwest::Method;
 
 use crate::airflow::{
@@ -14,24 +14,61 @@ use super::V1Client;
 
 #[async_trait]
 impl DagOperations for V1Client {
-    async fn list_dags(&self) -> Result<DagList> {
-        let r = self.base_api(Method::GET, "dags")?.build()?;
-        let response = self.base.client.execute(r).await?.error_for_status()?;
-
-        // Try to get the response text first for better error messages
-        let response_text = response.text().await?;
+    async fn list_dags(&self, only_active: bool) -> Result<DagList> {
+        // Fetch all DAGs using pagination
+        // Note: only_active filters by is_active (scheduler visibility), not is_paused
+        // Since we want to filter by pause state, we fetch all DAGs and filter locally
+        debug!("list_dags called with only_active={}, fetching all DAGs with pagination", only_active);
         
-        match serde_json::from_str::<DagCollectionResponse>(&response_text) {
-            Ok(daglist) => {
-                info!("DAGs: {daglist:?}");
-                Ok(daglist.into())
+        let mut all_dags = Vec::new();
+        let mut offset = 0;
+        let limit = 100; // API seems to have a max limit of 100
+        let mut total_entries = 0;
+        
+        loop {
+            let response = self
+                .base_api(Method::GET, "dags")?
+                .query(&[
+                    ("limit", limit.to_string()),
+                    ("offset", offset.to_string()),
+                    ("only_active", "false".to_string())
+                ])
+                .send()
+                .await?
+                .error_for_status()?;
+
+            // Try to get the response text first for better error messages
+            let response_text = response.text().await?;
+            
+            let page: DagCollectionResponse = match serde_json::from_str(&response_text) {
+                Ok(page) => page,
+                Err(e) => {
+                    log::error!("Failed to decode DAG list response. Error: {}", e);
+                    log::error!("Response body (first 500 chars): {}", &response_text.chars().take(500).collect::<String>());
+                    return Err(anyhow::anyhow!("Failed to decode response: {}. Check debug log for response body.", e));
+                }
+            };
+            
+            total_entries = page.total_entries;
+            let fetched_count = page.dags.len();
+            all_dags.extend(page.dags);
+            
+            debug!("Fetched {} DAGs at offset {}, total so far: {}/{}", fetched_count, offset, all_dags.len(), total_entries);
+            
+            // Break if we've fetched all DAGs or got fewer than limit (last page)
+            if all_dags.len() >= total_entries as usize || fetched_count < limit {
+                break;
             }
-            Err(e) => {
-                log::error!("Failed to decode DAG list response. Error: {}", e);
-                log::error!("Response body (first 500 chars): {}", &response_text.chars().take(500).collect::<String>());
-                Err(anyhow::anyhow!("Failed to decode response: {}. Check debug log for response body.", e))
-            }
+            
+            offset += limit;
         }
+        
+        info!("DAGs fetched: {} out of {} total (only_active: {})", all_dags.len(), total_entries, only_active);
+        
+        Ok(DagList { 
+            dags: all_dags.into_iter().map(|d| d.into()).collect(),
+            total_entries,
+        })
     }
 
     async fn toggle_dag(&self, dag_id: &str, is_paused: bool) -> Result<()> {
@@ -101,14 +138,14 @@ mod tests {
     #[tokio::test]
     async fn test_list_dags() {
         let client = get_test_client();
-        let daglist: DagList = client.list_dags().await.unwrap();
+        let daglist: DagList = client.list_dags(false).await.unwrap();
         assert_eq!(daglist.dags[0].owners, vec!["airflow"]);
     }
 
     #[tokio::test]
     async fn test_get_dag_code() {
         let client = get_test_client();
-        let dag = client.list_dags().await.unwrap().dags[0].clone();
+        let dag = client.list_dags(false).await.unwrap().dags[0].clone();
         let code = client.get_dag_code(&dag).await.unwrap();
         assert!(code.contains("with DAG"));
     }

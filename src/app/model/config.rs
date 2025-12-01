@@ -155,7 +155,7 @@ impl Widget for &mut ConfigModel {
                 .margin(0)
                 .split(area)
         };
-        let selected_style = DEFAULT_STYLE.add_modifier(Modifier::REVERSED);
+        let selected_style = crate::ui::constants::SELECTED_STYLE;
 
         let headers = ["Name", "Endpoint", "Managed", "Version"];
         let header_row = create_headers(headers);

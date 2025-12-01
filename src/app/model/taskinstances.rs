@@ -284,7 +284,7 @@ impl Widget for &mut TaskInstanceModel {
                 .split(area)
         };
 
-        let selected_style = Style::default().add_modifier(Modifier::REVERSED);
+        let selected_style = crate::ui::constants::SELECTED_STYLE;
 
         let headers = ["Task ID", "Execution Date", "Duration", "State", "Tries"];
         let header_row = create_headers(headers);

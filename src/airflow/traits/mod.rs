@@ -13,10 +13,12 @@ pub use taskinstance::TaskInstanceOperations;
 use crate::airflow::config::AirflowVersion;
 use crate::app::worker::OpenItem;
 use anyhow::Result;
+use async_trait::async_trait;
 
 /// Super-trait combining all Airflow API operations.
 /// This trait can be implemented by different API versions (v1 for Airflow v2, v2 for Airflow v3)
 /// to provide a consistent interface for interacting with Airflow.
+#[async_trait]
 pub trait AirflowClient:
     DagOperations + DagRunOperations + TaskInstanceOperations + LogOperations + DagStatsOperations
 {
@@ -28,4 +30,7 @@ pub trait AirflowClient:
     /// The URL structure differs between Airflow v2 and v3.
     #[allow(unused)]
     fn build_open_url(&self, item: &OpenItem) -> Result<String>;
+    
+    /// Get the count of import errors
+    async fn get_import_error_count(&self) -> Result<usize>;
 }

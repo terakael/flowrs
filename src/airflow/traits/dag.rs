@@ -7,7 +7,10 @@ use crate::airflow::model::common::{Dag, DagList};
 #[async_trait]
 pub trait DagOperations: Send + Sync {
     /// List all DAGs
-    async fn list_dags(&self) -> Result<DagList>;
+    /// 
+    /// # Arguments
+    /// * `only_active` - If true, only return active (non-paused) DAGs
+    async fn list_dags(&self, only_active: bool) -> Result<DagList>;
 
     /// Toggle a DAG's paused state
     async fn toggle_dag(&self, dag_id: &str, is_paused: bool) -> Result<()>;
