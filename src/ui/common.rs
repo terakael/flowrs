@@ -5,7 +5,7 @@ use ratatui::{
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use super::constants::{AirflowStateColor, BRIGHT_YELLOW, DEFAULT_STYLE, HEADER_STYLE};
+use super::constants::{AirflowStateColor, BLACK, BRIGHT_YELLOW, HEADER_STYLE};
 
 pub fn create_headers<'a>(
     headers: impl IntoIterator<Item = &'a str>,
@@ -97,11 +97,11 @@ pub fn highlight_search_text<'a>(text: &'a str, search: Option<&str>, base_color
             ));
         }
         
-        // Add highlighted matching part with yellow background
+        // Add highlighted matching part with yellow background and dark text
         spans.push(Span::styled(
             &text[idx..idx + search.len()],
             Style::default()
-                .fg(base_color)
+                .fg(BLACK)
                 .bg(BRIGHT_YELLOW),
         ));
         
