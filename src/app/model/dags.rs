@@ -1,6 +1,4 @@
 use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 use crossterm::event::KeyCode;
 use log::debug;
@@ -14,7 +12,7 @@ use time::OffsetDateTime;
 use crate::airflow::model::common::{Connection, Dag, DagRun, DagStatistic, ImportError, Variable};
 use crate::app::events::custom::FlowrsEvent;
 use crate::app::model::popup::dags::commands::DAG_COMMAND_POP_UP;
-use crate::ui::common::create_headers;
+use crate::ui::common::{create_headers, hash_to_color};
 use crate::ui::constants::{ALTERNATING_ROW_COLOR, DEFAULT_STYLE};
 
 use super::popup::commands_help::CommandPopUp;
@@ -118,6 +116,11 @@ pub struct DagModel {
     pub filtered_connections: StatefulTable<Connection>,
     pub selected_connection: Option<Connection>,
     
+    // State preservation for detail views
+    pub saved_tab: Option<DagPanelTab>,
+    pub saved_variable_selection: Option<usize>,
+    pub saved_connection_selection: Option<usize>,
+    
     // Shared UI state
     commands: Option<&'static CommandPopUp<'static>>,
     pub error_popup: Option<ErrorPopup>,
@@ -153,6 +156,11 @@ impl DagModel {
             all_connections: vec![],
             filtered_connections: StatefulTable::new(vec![]),
             selected_connection: None,
+            
+            // State preservation for detail views
+            saved_tab: None,
+            saved_variable_selection: None,
+            saved_connection_selection: None,
             
             // Shared UI state
             loading_status: LoadingStatus::NotStarted,
@@ -257,6 +265,42 @@ impl DagModel {
         self.all.iter().find(|dag| dag.dag_id == dag_id)
     }
 
+    pub fn save_state_before_detail_view(&mut self) {
+        self.saved_tab = Some(self.active_tab);
+        match self.active_tab {
+            DagPanelTab::Variables => {
+                self.saved_variable_selection = self.filtered_variables.state.selected();
+            }
+            DagPanelTab::Connections => {
+                self.saved_connection_selection = self.filtered_connections.state.selected();
+            }
+            DagPanelTab::Dags => {}
+        }
+    }
+
+    pub fn restore_state_from_detail_view(&mut self) {
+        if let Some(saved_tab) = self.saved_tab.take() {
+            self.active_tab = saved_tab;
+            match saved_tab {
+                DagPanelTab::Variables => {
+                    if let Some(selection) = self.saved_variable_selection.take() {
+                        if selection < self.filtered_variables.items.len() {
+                            self.filtered_variables.state.select(Some(selection));
+                        }
+                    }
+                }
+                DagPanelTab::Connections => {
+                    if let Some(selection) = self.saved_connection_selection.take() {
+                        if selection < self.filtered_connections.items.len() {
+                            self.filtered_connections.state.select(Some(selection));
+                        }
+                    }
+                }
+                DagPanelTab::Dags => {}
+            }
+        }
+    }
+
     fn get_dag_status(&self, dag: &Dag) -> DagStatus {
         if dag.is_paused {
             return DagStatus::Paused;
@@ -337,54 +381,6 @@ impl Default for DagModel {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Map a tag name to a consistent color using hash
-fn tag_to_color(tag_name: &str) -> Color {
-    // Available colors for tags (avoiding red/green/yellow which are used for states)
-    // Using a wide variety of colors for better visual distinction
-    const TAG_COLORS: &[Color] = &[
-        // Blues
-        crate::ui::constants::BLUE,
-        crate::ui::constants::BRIGHT_BLUE,
-        Color::Rgb(0x7f, 0xbb, 0xca),  // Light blue
-        Color::Rgb(0x5a, 0x8f, 0xb0),  // Medium blue
-        
-        // Magentas/Purples
-        crate::ui::constants::MAGENTA,
-        crate::ui::constants::BRIGHT_MAGENTA,
-        Color::Rgb(0xb5, 0x89, 0xd6),  // Light purple
-        Color::Rgb(0x9d, 0x79, 0xd6),  // Medium purple
-        
-        // Cyans/Teals
-        crate::ui::constants::CYAN,
-        crate::ui::constants::BRIGHT_CYAN,
-        Color::Rgb(0x83, 0xc0, 0x92),  // Light teal
-        Color::Rgb(0x6a, 0xa8, 0x9a),  // Medium teal
-        
-        // Oranges (safe, not too bright)
-        Color::Rgb(0xd6, 0x99, 0x78),  // Light orange
-        Color::Rgb(0xc0, 0x85, 0x68),  // Medium orange
-        Color::Rgb(0xa8, 0x7c, 0x5f),  // Dark orange
-        
-        // Pink/Rose
-        Color::Rgb(0xd6, 0x9c, 0xb8),  // Light pink
-        Color::Rgb(0xc5, 0x88, 0xa8),  // Medium pink
-        
-        // Olive/Brown tones
-        Color::Rgb(0xa8, 0xa0, 0x78),  // Light olive
-        Color::Rgb(0x95, 0x8d, 0x70),  // Medium olive
-        
-        // Gray-blues (for subtle distinction)
-        Color::Rgb(0x7a, 0x8b, 0x99),  // Blue-gray
-        Color::Rgb(0x8a, 0x9a, 0xa5),  // Light blue-gray
-    ];
-    
-    let mut hasher = DefaultHasher::new();
-    tag_name.hash(&mut hasher);
-    let hash = hasher.finish();
-    
-    TAG_COLORS[(hash as usize) % TAG_COLORS.len()]
 }
 
 /// Highlight search term occurrences in text with yellow background
@@ -675,25 +671,63 @@ impl Model for DagModel {
                             self.commands = Some(&*DAG_COMMAND_POP_UP);
                         }
                         KeyCode::Enter => {
-                            if let Some(selected_dag) = self.current().map(|dag| dag.dag_id.clone())
-                            {
-                                debug!("Selected dag: {selected_dag}");
-                                return (
-                                    Some(FlowrsEvent::Key(*key_event)),
-                                    vec![
-                                        WorkerMessage::UpdateDagRuns {
-                                            dag_id: selected_dag.clone(),
-                                            clear: true,
-                                        },
-                                        WorkerMessage::GetDagDetails {
-                                            dag_id: selected_dag,
-                                        },
-                                    ],
-                                );
+                            match self.active_tab {
+                                DagPanelTab::Dags => {
+                                    if let Some(selected_dag) = self.current().map(|dag| dag.dag_id.clone())
+                                    {
+                                        debug!("Selected dag: {selected_dag}");
+                                        return (
+                                            Some(FlowrsEvent::Key(*key_event)),
+                                            vec![
+                                                WorkerMessage::UpdateDagRuns {
+                                                    dag_id: selected_dag.clone(),
+                                                    clear: true,
+                                                },
+                                                WorkerMessage::GetDagDetails {
+                                                    dag_id: selected_dag,
+                                                },
+                                            ],
+                                        );
+                                    }
+                                    self.error_popup = Some(ErrorPopup::from_strings(vec![
+                                        "No DAG selected to view DAG Runs".to_string(),
+                                    ]));
+                                }
+                                DagPanelTab::Variables => {
+                                    if let Some(selected_idx) = self.filtered_variables.state.selected() {
+                                        if let Some(variable) = self.filtered_variables.items.get(selected_idx) {
+                                            let key = variable.key.clone();
+                                            debug!("Selected variable: {}", key);
+                                            // Save state before navigating to detail view
+                                            self.save_state_before_detail_view();
+                                            return (
+                                                Some(FlowrsEvent::Key(*key_event)),
+                                                vec![WorkerMessage::GetVariableDetail { key }],
+                                            );
+                                        }
+                                    }
+                                    self.error_popup = Some(ErrorPopup::from_strings(vec![
+                                        "No variable selected to view details".to_string(),
+                                    ]));
+                                }
+                                DagPanelTab::Connections => {
+                                    if let Some(selected_idx) = self.filtered_connections.state.selected() {
+                                        if let Some(connection) = self.filtered_connections.items.get(selected_idx) {
+                                            let connection_id = connection.connection_id.clone();
+                                            debug!("Selected connection: {}", connection_id);
+                                            // Save state before navigating to detail view
+                                            self.save_state_before_detail_view();
+                                            return (
+                                                Some(FlowrsEvent::Key(*key_event)),
+                                                vec![WorkerMessage::GetConnectionDetail { connection_id }],
+                                            );
+                                        }
+                                    }
+                                    self.error_popup = Some(ErrorPopup::from_strings(vec![
+                                        "No connection selected to view details".to_string(),
+                                    ]));
+                                }
                             }
-                            self.error_popup = Some(ErrorPopup::from_strings(vec![
-                                "No DAG selected to view DAG Runs".to_string(),
-                            ]));
                         }
                         KeyCode::Char('g') => {
                             if let Some(FlowrsEvent::Key(key_event)) = self.event_buffer.pop() {
@@ -888,7 +922,7 @@ impl DagModel {
                                         if i > 0 {
                                             spans.push(Span::raw(", "));
                                         }
-                                        let tag_color = tag_to_color(&tag.name);
+                                        let tag_color = hash_to_color(&tag.name);
                                         let highlighted_spans = highlight_search_term(&tag.name, search_term, tag_color);
                                         spans.extend(highlighted_spans);
                                     }
@@ -1007,7 +1041,7 @@ impl DagModel {
                 
                 let rows = self.filtered_connections.items.iter().enumerate().map(|(idx, item)| {
                     // Use the same color mapping as tags for connection types
-                    let type_color = tag_to_color(&item.conn_type);
+                    let type_color = hash_to_color(&item.conn_type);
                     
                     Row::new(vec![
                         Line::from(highlight_search_term(&item.connection_id, search_term, Color::Reset)),

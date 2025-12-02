@@ -5,7 +5,12 @@ use crate::app::model::dags::DagModel;
 use throbber_widgets_tui::ThrobberState;
 use log::debug;
 
-use super::model::{config::ConfigModel, logs::LogModel, taskinstances::TaskInstanceModel};
+use super::model::{
+    config::ConfigModel,
+    detail::{ConnectionDetailModel, VariableDetailModel},
+    logs::LogModel, 
+    taskinstances::TaskInstanceModel,
+};
 
 pub struct App {
     pub config: FlowrsConfig,
@@ -15,6 +20,8 @@ pub struct App {
     pub dagruns: DagRunModel,
     pub task_instances: TaskInstanceModel,
     pub logs: LogModel,
+    pub variable_detail: VariableDetailModel,
+    pub connection_detail: ConnectionDetailModel,
     pub ticks: u32,
     pub active_panel: Panel,
     pub loading: bool,
@@ -29,6 +36,8 @@ pub enum Panel {
     DAGRun,
     TaskInstance,
     Logs,
+    VariableDetail,
+    ConnectionDetail,
 }
 
 impl App {
@@ -52,6 +61,8 @@ impl App {
             dagruns: DagRunModel::new(),
             task_instances: TaskInstanceModel::new(),
             logs: LogModel::new(),
+            variable_detail: VariableDetailModel::new(),
+            connection_detail: ConnectionDetailModel::new(),
             active_panel: match active_server {
                 Some(_) => Panel::Dag,
                 None => Panel::Config,
@@ -70,6 +81,8 @@ impl App {
             Panel::DAGRun => self.active_panel = Panel::TaskInstance,
             Panel::TaskInstance => self.active_panel = Panel::Logs,
             Panel::Logs => (),
+            // Detail panels go back to DAG panel (they're not in the main flow)
+            Panel::VariableDetail | Panel::ConnectionDetail => self.active_panel = Panel::Dag,
         }
     }
 
@@ -80,6 +93,8 @@ impl App {
             Panel::DAGRun => self.active_panel = Panel::Dag,
             Panel::TaskInstance => self.active_panel = Panel::DAGRun,
             Panel::Logs => self.active_panel = Panel::TaskInstance,
+            // Detail panels go back to DAG panel
+            Panel::VariableDetail | Panel::ConnectionDetail => self.active_panel = Panel::Dag,
         }
     }
 
@@ -108,6 +123,8 @@ impl App {
                 self.dags.all = self.environment_state.get_active_dags();
                 self.dags.filter_dags();
                 debug!("sync_panel_data: Synced {} DAGs to panel, recent_runs has {} entries", dag_count, self.dags.recent_runs.len());
+                // Restore tab and selection state when returning from detail views
+                self.dags.restore_state_from_detail_view();
             }
             Panel::DAGRun => {
                 if let Some(dag_id) = &self.dagruns.dag_id.clone() {
@@ -181,6 +198,10 @@ impl App {
             }
             Panel::Config => {
                 // Config panel doesn't need syncing
+            }
+            Panel::VariableDetail | Panel::ConnectionDetail => {
+                // Detail panels don't sync from environment_state
+                // They're populated by worker messages when navigating to them
             }
         }
     }

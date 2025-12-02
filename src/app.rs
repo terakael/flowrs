@@ -75,6 +75,8 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: Arc<Mutex<App>
                     Panel::DAGRun => app.dagruns.update(&event),
                     Panel::TaskInstance => app.task_instances.update(&event),
                     Panel::Logs => app.logs.update(&event),
+                    Panel::VariableDetail => app.variable_detail.update(&event),
+                    Panel::ConnectionDetail => app.connection_detail.update(&event),
                 }
             };
 

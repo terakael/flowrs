@@ -6,6 +6,7 @@ use super::{events::custom::FlowrsEvent, worker::WorkerMessage};
 pub mod config;
 pub mod dagruns;
 pub mod dags;
+pub mod detail;
 pub mod filter;
 pub mod logs;
 pub mod popup;

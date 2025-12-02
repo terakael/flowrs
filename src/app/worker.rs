@@ -943,7 +943,9 @@ impl Worker {
                     Ok(variable) => {
                         debug!("Fetched variable detail for key: {}", key);
                         let mut app = self.app.lock().unwrap();
-                        app.dags.selected_variable = Some(variable);
+                        app.dags.selected_variable = Some(variable.clone());
+                        app.variable_detail.set_variable(variable);
+                        app.active_panel = crate::app::state::Panel::VariableDetail;
                     }
                     Err(e) => {
                         log::error!("Failed to fetch variable detail: {}", e);
@@ -978,7 +980,9 @@ impl Worker {
                     Ok(connection) => {
                         debug!("Fetched connection detail for id: {}", connection_id);
                         let mut app = self.app.lock().unwrap();
-                        app.dags.selected_connection = Some(connection);
+                        app.dags.selected_connection = Some(connection.clone());
+                        app.connection_detail.set_connection(connection);
+                        app.active_panel = crate::app::state::Panel::ConnectionDetail;
                     }
                     Err(e) => {
                         log::error!("Failed to fetch connection detail: {}", e);

@@ -78,5 +78,7 @@ pub fn draw_ui(f: &mut Frame, app: &Arc<Mutex<App>>) {
             }
         }
         Panel::Logs => app.logs.render(panel_area, f.buffer_mut()),
+        Panel::VariableDetail => app.variable_detail.render(panel_area, f.buffer_mut()),
+        Panel::ConnectionDetail => app.connection_detail.render(panel_area, f.buffer_mut()),
     }
 }
