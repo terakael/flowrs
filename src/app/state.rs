@@ -7,7 +7,7 @@ use log::debug;
 
 use super::model::{
     config::ConfigModel,
-    detail::{ConnectionDetailModel, VariableDetailModel},
+    detail::{ConnectionDetailModel, ImportErrorDetailModel, VariableDetailModel},
     logs::LogModel, 
     taskinstances::TaskInstanceModel,
 };
@@ -22,6 +22,7 @@ pub struct App {
     pub logs: LogModel,
     pub variable_detail: VariableDetailModel,
     pub connection_detail: ConnectionDetailModel,
+    pub import_error_detail: ImportErrorDetailModel,
     pub ticks: u32,
     pub active_panel: Panel,
     pub loading: bool,
@@ -38,6 +39,7 @@ pub enum Panel {
     Logs,
     VariableDetail,
     ConnectionDetail,
+    ImportErrorDetail,
 }
 
 impl App {
@@ -63,6 +65,7 @@ impl App {
             logs: LogModel::new(),
             variable_detail: VariableDetailModel::new(),
             connection_detail: ConnectionDetailModel::new(),
+            import_error_detail: ImportErrorDetailModel::new(),
             active_panel: match active_server {
                 Some(_) => Panel::Dag,
                 None => Panel::Config,
@@ -82,7 +85,7 @@ impl App {
             Panel::TaskInstance => self.active_panel = Panel::Logs,
             Panel::Logs => (),
             // Detail panels go back to DAG panel (they're not in the main flow)
-            Panel::VariableDetail | Panel::ConnectionDetail => self.active_panel = Panel::Dag,
+            Panel::VariableDetail | Panel::ConnectionDetail | Panel::ImportErrorDetail => self.active_panel = Panel::Dag,
         }
     }
 
@@ -94,7 +97,7 @@ impl App {
             Panel::TaskInstance => self.active_panel = Panel::DAGRun,
             Panel::Logs => self.active_panel = Panel::TaskInstance,
             // Detail panels go back to DAG panel
-            Panel::VariableDetail | Panel::ConnectionDetail => self.active_panel = Panel::Dag,
+            Panel::VariableDetail | Panel::ConnectionDetail | Panel::ImportErrorDetail => self.active_panel = Panel::Dag,
         }
     }
 
@@ -199,7 +202,7 @@ impl App {
             Panel::Config => {
                 // Config panel doesn't need syncing
             }
-            Panel::VariableDetail | Panel::ConnectionDetail => {
+            Panel::VariableDetail | Panel::ConnectionDetail | Panel::ImportErrorDetail => {
                 // Detail panels don't sync from environment_state
                 // They're populated by worker messages when navigating to them
             }

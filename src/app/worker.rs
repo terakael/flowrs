@@ -100,6 +100,10 @@ pub enum WorkerMessage {
     GetConnectionDetail {
         connection_id: String,
     },
+    // Import Errors
+    GetImportErrorDetail {
+        import_error_id: i64,
+    },
 }
 
 #[derive(Debug)]
@@ -316,9 +320,8 @@ impl Worker {
                         tokio::spawn(async move {
                             if let Ok(error_list) = client_clone.list_import_errors().await {
                                 let mut app = app_clone.lock().unwrap();
-                                app.dags.import_error_count = error_list.total_entries as usize;
                                 app.dags.import_error_list = error_list.import_errors.clone();
-                                app.dags.import_errors.set_errors(&error_list.import_errors);
+                                app.dags.filter_import_errors();
                             }
                         });
                     }
@@ -868,19 +871,15 @@ impl Worker {
                         let count = error_list.total_entries as usize;
                         debug!("Fetched {} import errors", count);
                         
-                        // Update count
-                        app.dags.import_error_count = count;
-                        
-                        // Update error list and widget
+                        // Update error list
                         app.dags.import_error_list = error_list.import_errors.clone();
-                        app.dags.import_errors.set_errors(&error_list.import_errors);
+                        app.dags.filter_import_errors();
                     }
                     Err(e) => {
                         log::debug!("Failed to fetch import errors: {}", e);
                         // Clear everything on failure
-                        app.dags.import_error_count = 0;
                         app.dags.import_error_list = vec![];
-                        app.dags.import_errors.clear();
+                        app.dags.filtered_import_errors.items.clear();
                     }
                 }
             }
@@ -991,6 +990,24 @@ impl Worker {
                             format!("Failed to fetch connection: {}", e),
                         ]));
                     }
+                }
+            }
+            WorkerMessage::GetImportErrorDetail { import_error_id } => {
+                // Import errors are already fetched in the list, so we just need to find it
+                let mut app = self.app.lock().unwrap();
+                if let Some(import_error) = app.dags.import_error_list
+                    .iter()
+                    .find(|err| err.import_error_id == Some(import_error_id))
+                    .cloned()
+                {
+                    debug!("Found import error detail for id: {}", import_error_id);
+                    app.import_error_detail.set_import_error(import_error);
+                    app.active_panel = crate::app::state::Panel::ImportErrorDetail;
+                } else {
+                    log::error!("Import error not found: {}", import_error_id);
+                    app.dags.error_popup = Some(ErrorPopup::from_strings(vec![
+                        format!("Import error not found: {}", import_error_id),
+                    ]));
                 }
             }
             // ConfigSelected is handled before the client check above

@@ -4,9 +4,9 @@ use crossterm::event::KeyCode;
 use log::debug;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget, Table, Widget, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Row, StatefulWidget, Table, Widget};
 use time::OffsetDateTime;
 
 use crate::airflow::model::common::{Connection, Dag, DagRun, DagStatistic, ImportError, Variable};
@@ -17,7 +17,7 @@ use crate::ui::constants::{ALTERNATING_ROW_COLOR, DEFAULT_STYLE};
 
 use super::popup::commands_help::CommandPopUp;
 use super::popup::error::ErrorPopup;
-use super::{filter::Filter, Model, StatefulTable, handle_table_scroll_keys, handle_vertical_scroll_keys};
+use super::{filter::Filter, Model, StatefulTable, handle_table_scroll_keys};
 use crate::app::worker::{OpenItem, WorkerMessage};
 
 // Constants for DAG health monitoring and UI layout
@@ -25,14 +25,13 @@ use crate::app::worker::{OpenItem, WorkerMessage};
 pub const RECENT_RUNS_HEALTH_WINDOW: usize = 7;
 /// Width of the state column (for colored square indicator)
 const STATE_COLUMN_WIDTH: u16 = 5;
-/// Height of the import errors panel
-const IMPORT_ERRORS_PANEL_HEIGHT: u16 = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DagPanelTab {
     Dags,
     Variables,
     Connections,
+    ImportErrors,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -41,53 +40,6 @@ pub enum LoadingStatus {
     LoadingInitial,
     LoadingMore { current: usize, total: usize },
     Complete,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum DagStatus {
-    Failed,    // Highest priority (sort first)
-    Running,
-    Idle,
-    Paused,    // Lowest priority (sort last)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum DagFocusedSection {
-    ImportErrors,
-    DagTable,
-}
-
-#[derive(Default)]
-pub struct ImportErrorWidget {
-    pub cached_lines: Option<Vec<Line<'static>>>,
-    pub vertical_scroll: usize,
-    pub vertical_scroll_state: ScrollbarState,
-}
-
-impl ImportErrorWidget {
-    pub fn set_errors(&mut self, errors: &[ImportError]) {
-        let new_lines = format_import_errors(errors);
-        let content_length = new_lines.len();
-        
-        // Only reset scroll position if this is the first time loading
-        if self.cached_lines.is_none() {
-            self.vertical_scroll = 0;
-        } else {
-            // Ensure scroll position doesn't exceed new content length
-            self.vertical_scroll = self.vertical_scroll.min(content_length.saturating_sub(1));
-        }
-        
-        self.cached_lines = Some(new_lines);
-        self.vertical_scroll_state = ScrollbarState::default()
-            .content_length(content_length)
-            .position(self.vertical_scroll);
-    }
-
-    pub fn clear(&mut self) {
-        self.cached_lines = None;
-        self.vertical_scroll = 0;
-        self.vertical_scroll_state = ScrollbarState::default();
-    }
 }
 
 pub struct DagModel {
@@ -101,10 +53,7 @@ pub struct DagModel {
     pub filtered: StatefulTable<Dag>,
     pub filter: Filter,
     pub show_paused: bool,
-    pub import_error_count: usize,
-    pub import_errors: ImportErrorWidget,
     pub import_error_list: Vec<ImportError>,
-    pub focused_section: DagFocusedSection,
     
     // Variables tab data
     pub all_variables: Vec<Variable>,
@@ -116,10 +65,14 @@ pub struct DagModel {
     pub filtered_connections: StatefulTable<Connection>,
     pub selected_connection: Option<Connection>,
     
+    // Import errors tab data
+    pub filtered_import_errors: StatefulTable<ImportError>,
+    
     // State preservation for detail views
     pub saved_tab: Option<DagPanelTab>,
     pub saved_variable_selection: Option<usize>,
     pub saved_connection_selection: Option<usize>,
+    pub saved_import_error_selection: Option<usize>,
     
     // Shared UI state
     commands: Option<&'static CommandPopUp<'static>>,
@@ -142,10 +95,7 @@ impl DagModel {
             filtered: StatefulTable::new(vec![]),
             filter: Filter::new(),
             show_paused: false,
-            import_error_count: 0,
-            import_errors: ImportErrorWidget::default(),
             import_error_list: vec![],
-            focused_section: DagFocusedSection::DagTable,
             
             // Variables tab data
             all_variables: vec![],
@@ -157,10 +107,14 @@ impl DagModel {
             filtered_connections: StatefulTable::new(vec![]),
             selected_connection: None,
             
+            // Import errors tab data
+            filtered_import_errors: StatefulTable::new(vec![]),
+            
             // State preservation for detail views
             saved_tab: None,
             saved_variable_selection: None,
             saved_connection_selection: None,
+            saved_import_error_selection: None,
             
             // Shared UI state
             loading_status: LoadingStatus::NotStarted,
@@ -255,6 +209,47 @@ impl DagModel {
         self.filtered_connections.items = filtered_connections;
     }
 
+    pub fn filter_import_errors(&mut self) {
+        let prefix = &self.filter.prefix;
+        
+        let mut filtered_import_errors: Vec<ImportError> = match prefix {
+            Some(prefix) => {
+                let lower_prefix = prefix.to_lowercase();
+                self.import_error_list
+                    .iter()
+                    .filter(|err| {
+                        // Extract filename stem for searching
+                        let filename_stem = err.filename.as_ref().and_then(|f| {
+                            std::path::Path::new(f)
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                        });
+                        
+                        let matches_filename = filename_stem
+                            .map(|stem| stem.to_lowercase().contains(&lower_prefix))
+                            .unwrap_or(false);
+                        
+                        let matches_stacktrace = err.stack_trace
+                            .as_ref()
+                            .map(|st| st.to_lowercase().contains(&lower_prefix))
+                            .unwrap_or(false);
+                        
+                        matches_filename || matches_stacktrace
+                    })
+                    .cloned()
+                    .collect()
+            }
+            None => self.import_error_list.clone(),
+        };
+        
+        // Sort by timestamp (newest first)
+        filtered_import_errors.sort_by(|a, b| {
+            b.timestamp.cmp(&a.timestamp)
+        });
+        
+        self.filtered_import_errors.items = filtered_import_errors;
+    }
+
     pub fn current(&mut self) -> Option<&mut Dag> {
         self.filtered
             .state
@@ -273,6 +268,9 @@ impl DagModel {
             }
             DagPanelTab::Connections => {
                 self.saved_connection_selection = self.filtered_connections.state.selected();
+            }
+            DagPanelTab::ImportErrors => {
+                self.saved_import_error_selection = self.filtered_import_errors.state.selected();
             }
             DagPanelTab::Dags => {}
         }
@@ -296,29 +294,16 @@ impl DagModel {
                         }
                     }
                 }
+                DagPanelTab::ImportErrors => {
+                    if let Some(selection) = self.saved_import_error_selection.take() {
+                        if selection < self.filtered_import_errors.items.len() {
+                            self.filtered_import_errors.state.select(Some(selection));
+                        }
+                    }
+                }
                 DagPanelTab::Dags => {}
             }
         }
-    }
-
-    fn get_dag_status(&self, dag: &Dag) -> DagStatus {
-        if dag.is_paused {
-            return DagStatus::Paused;
-        }
-        
-        if let Some(stats) = self.dag_stats.get(&dag.dag_id) {
-            let has_failed = stats.iter().any(|s| s.state == "failed" && s.count > 0);
-            let has_running = stats.iter().any(|s| s.state == "running" && s.count > 0);
-            
-            if has_failed {
-                return DagStatus::Failed;
-            }
-            if has_running {
-                return DagStatus::Running;
-            }
-        }
-        
-        DagStatus::Idle
     }
 
     /// Get DAG state color based on recent runs (last 7)
@@ -480,6 +465,7 @@ impl Model for DagModel {
                             DagPanelTab::Dags => self.filter_dags(),
                             DagPanelTab::Variables => self.filter_variables(),
                             DagPanelTab::Connections => self.filter_connections(),
+                            DagPanelTab::ImportErrors => self.filter_import_errors(),
                         }
                         return (None, vec![]);
                     } else if self.filter.prefix.is_some() {
@@ -489,6 +475,7 @@ impl Model for DagModel {
                             DagPanelTab::Dags => self.filter_dags(),
                             DagPanelTab::Variables => self.filter_variables(),
                             DagPanelTab::Connections => self.filter_connections(),
+                            DagPanelTab::ImportErrors => self.filter_import_errors(),
                         }
                         return (None, vec![]);
                     }
@@ -502,6 +489,7 @@ impl Model for DagModel {
                         DagPanelTab::Dags => self.filter_dags(),
                         DagPanelTab::Variables => self.filter_variables(),
                         DagPanelTab::Connections => self.filter_connections(),
+                        DagPanelTab::ImportErrors => self.filter_import_errors(),
                     }
                     return (None, vec![]);
                 } else if let Some(_error_popup) = &mut self.error_popup {
@@ -520,25 +508,19 @@ impl Model for DagModel {
                         _ => (),
                     }
                 } else {
-                    // Handle scrolling based on focused section and active tab
-                    let handled = match (self.active_tab, self.focused_section) {
-                        (DagPanelTab::Dags, DagFocusedSection::ImportErrors) => {
-                            let max_lines = self.import_errors.cached_lines.as_ref().map(|lines| lines.len());
-                            handle_vertical_scroll_keys(
-                                &mut self.import_errors.vertical_scroll,
-                                &mut self.import_errors.vertical_scroll_state,
-                                key_event,
-                                max_lines,
-                            )
-                        }
-                        (DagPanelTab::Dags, DagFocusedSection::DagTable) => {
+                    // Handle scrolling based on active tab
+                    let handled = match self.active_tab {
+                        DagPanelTab::Dags => {
                             handle_table_scroll_keys(&mut self.filtered, key_event)
                         }
-                        (DagPanelTab::Variables, _) => {
+                        DagPanelTab::Variables => {
                             handle_table_scroll_keys(&mut self.filtered_variables, key_event)
                         }
-                        (DagPanelTab::Connections, _) => {
+                        DagPanelTab::Connections => {
                             handle_table_scroll_keys(&mut self.filtered_connections, key_event)
+                        }
+                        DagPanelTab::ImportErrors => {
+                            handle_table_scroll_keys(&mut self.filtered_import_errors, key_event)
                         }
                     };
                     
@@ -551,14 +533,12 @@ impl Model for DagModel {
                             // Shift+H - Previous tab
                             self.active_tab = match self.active_tab {
                                 DagPanelTab::Dags => DagPanelTab::Dags, // Stay on first tab
-                                DagPanelTab::Variables => {
-                                    // When switching back to DAGs tab, reset focus to table
-                                    self.focused_section = DagFocusedSection::DagTable;
-                                    DagPanelTab::Dags
-                                }
+                                DagPanelTab::Variables => DagPanelTab::Dags,
                                 DagPanelTab::Connections => DagPanelTab::Variables,
+                                DagPanelTab::ImportErrors => DagPanelTab::Connections,
                             };
                             // Lazy load: trigger data load if tab hasn't been loaded yet
+                            // Note: Import errors are always loaded with DAGs, no lazy loading needed
                             let messages = match self.active_tab {
                                 DagPanelTab::Variables if self.all_variables.is_empty() => {
                                     vec![WorkerMessage::UpdateVariables]
@@ -575,9 +555,11 @@ impl Model for DagModel {
                             self.active_tab = match self.active_tab {
                                 DagPanelTab::Dags => DagPanelTab::Variables,
                                 DagPanelTab::Variables => DagPanelTab::Connections,
-                                DagPanelTab::Connections => DagPanelTab::Connections, // Stay on last tab
+                                DagPanelTab::Connections => DagPanelTab::ImportErrors,
+                                DagPanelTab::ImportErrors => DagPanelTab::ImportErrors, // Stay on last tab
                             };
                             // Lazy load: trigger data load if tab hasn't been loaded yet
+                            // Note: Import errors are always loaded with DAGs, no lazy loading needed
                             let messages = match self.active_tab {
                                 DagPanelTab::Variables if self.all_variables.is_empty() => {
                                     vec![WorkerMessage::UpdateVariables]
@@ -589,36 +571,20 @@ impl Model for DagModel {
                             };
                             return (None, messages);
                         }
-                        KeyCode::Char('J') => {
-                            // Switch focus to DAG table (down) - only relevant for DAGs tab with import errors
-                            if self.active_tab == DagPanelTab::Dags {
-                                self.focused_section = DagFocusedSection::DagTable;
-                            }
-                        }
-                        KeyCode::Char('K') => {
-                            // Switch focus to ImportErrors panel (up) - only relevant for DAGs tab
-                            if self.active_tab == DagPanelTab::Dags && self.import_errors.cached_lines.is_some() {
-                                self.focused_section = DagFocusedSection::ImportErrors;
-                            }
-                        }
                         KeyCode::Char('G') => {
-                            // Jump to bottom of active section
-                            match (self.active_tab, self.focused_section) {
-                                (DagPanelTab::Dags, DagFocusedSection::ImportErrors) => {
-                                    if let Some(cached_lines) = &self.import_errors.cached_lines {
-                                        self.import_errors.vertical_scroll = cached_lines.len().saturating_sub(1);
-                                        self.import_errors.vertical_scroll_state = 
-                                            self.import_errors.vertical_scroll_state.position(self.import_errors.vertical_scroll);
-                                    }
-                                }
-                                (DagPanelTab::Dags, DagFocusedSection::DagTable) => {
+                            // Jump to bottom of active tab
+                            match self.active_tab {
+                                DagPanelTab::Dags => {
                                     self.filtered.state.select_last();
                                 }
-                                (DagPanelTab::Variables, _) => {
+                                DagPanelTab::Variables => {
                                     self.filtered_variables.state.select_last();
                                 }
-                                (DagPanelTab::Connections, _) => {
+                                DagPanelTab::Connections => {
                                     self.filtered_connections.state.select_last();
+                                }
+                                DagPanelTab::ImportErrors => {
+                                    self.filtered_import_errors.state.select_last();
                                 }
                             }
                         }
@@ -665,6 +631,7 @@ impl Model for DagModel {
                                 DagPanelTab::Dags => self.filter_dags(),
                                 DagPanelTab::Variables => self.filter_variables(),
                                 DagPanelTab::Connections => self.filter_connections(),
+                                DagPanelTab::ImportErrors => self.filter_import_errors(),
                             }
                         }
                         KeyCode::Char('?') => {
@@ -727,26 +694,42 @@ impl Model for DagModel {
                                         "No connection selected to view details".to_string(),
                                     ]));
                                 }
+                                DagPanelTab::ImportErrors => {
+                                    if let Some(selected_idx) = self.filtered_import_errors.state.selected() {
+                                        if let Some(import_error) = self.filtered_import_errors.items.get(selected_idx) {
+                                            if let Some(import_error_id) = import_error.import_error_id {
+                                                debug!("Selected import error: {}", import_error_id);
+                                                // Save state before navigating to detail view
+                                                self.save_state_before_detail_view();
+                                                return (
+                                                    Some(FlowrsEvent::Key(*key_event)),
+                                                    vec![WorkerMessage::GetImportErrorDetail { import_error_id }],
+                                                );
+                                            }
+                                        }
+                                    }
+                                    self.error_popup = Some(ErrorPopup::from_strings(vec![
+                                        "No import error selected to view details".to_string(),
+                                    ]));
+                                }
                             }
                         }
                         KeyCode::Char('g') => {
                             if let Some(FlowrsEvent::Key(key_event)) = self.event_buffer.pop() {
                                 if key_event.code == KeyCode::Char('g') {
-                                    // Jump to top of active section
-                                    match (self.active_tab, self.focused_section) {
-                                        (DagPanelTab::Dags, DagFocusedSection::ImportErrors) => {
-                                            self.import_errors.vertical_scroll = 0;
-                                            self.import_errors.vertical_scroll_state = 
-                                                self.import_errors.vertical_scroll_state.position(0);
-                                        }
-                                        (DagPanelTab::Dags, DagFocusedSection::DagTable) => {
+                                    // Jump to top of active tab
+                                    match self.active_tab {
+                                        DagPanelTab::Dags => {
                                             self.filtered.state.select_first();
                                         }
-                                        (DagPanelTab::Variables, _) => {
+                                        DagPanelTab::Variables => {
                                             self.filtered_variables.state.select_first();
                                         }
-                                        (DagPanelTab::Connections, _) => {
+                                        DagPanelTab::Connections => {
                                             self.filtered_connections.state.select_first();
+                                        }
+                                        DagPanelTab::ImportErrors => {
+                                            self.filtered_import_errors.state.select_first();
                                         }
                                     }
                                 } else {
@@ -790,6 +773,9 @@ impl Model for DagModel {
                                 DagPanelTab::Connections => {
                                     return (None, vec![WorkerMessage::UpdateConnections]);
                                 }
+                                DagPanelTab::ImportErrors => {
+                                    return (None, vec![WorkerMessage::UpdateImportErrors]);
+                                }
                             }
                         }
                         _ => return (Some(FlowrsEvent::Key(*key_event)), vec![]), // if no match, return the event
@@ -806,11 +792,16 @@ impl Model for DagModel {
 impl DagModel {
     fn create_tab_title(&self) -> Line<'static> {
         // Create tab labels with highlighting for active tab
-        let tabs = vec![
+        let mut tabs = vec![
             (DagPanelTab::Dags, "DAGs"),
             (DagPanelTab::Variables, "Variables"),
             (DagPanelTab::Connections, "Connections"),
         ];
+        
+        // Only show ImportErrors tab if there are errors
+        if !self.import_error_list.is_empty() {
+            tabs.push((DagPanelTab::ImportErrors, "Import Errors"));
+        }
         
         let mut spans = Vec::new();
         for (i, (tab, label)) in tabs.iter().enumerate() {
@@ -820,12 +811,17 @@ impl DagModel {
             
             if *tab == self.active_tab {
                 // Active tab: highlighted with cyan and bold
-                spans.push(Span::styled(
-                    format!("[{}]", label),
+                let style = if *tab == DagPanelTab::ImportErrors {
+                    // Red for import errors tab
+                    Style::default()
+                        .fg(crate::ui::constants::RED)
+                        .add_modifier(Modifier::BOLD)
+                } else {
                     Style::default()
                         .fg(crate::ui::constants::CYAN)
                         .add_modifier(Modifier::BOLD)
-                ));
+                };
+                spans.push(Span::styled(format!("[{}]", label), style));
             } else {
                 // Inactive tabs: gray and not bold
                 spans.push(Span::styled(
@@ -840,11 +836,7 @@ impl DagModel {
     
     fn render_tabbed_container(&mut self, area: Rect, buf: &mut Buffer) {
         let selected_style = crate::ui::constants::SELECTED_STYLE;
-        let border_style = if self.active_tab != DagPanelTab::Dags || self.focused_section == DagFocusedSection::DagTable {
-            DEFAULT_STYLE.fg(Color::Cyan) // Highlight when focused (or when not on DAGs tab)
-        } else {
-            DEFAULT_STYLE // Not focused (only happens on DAGs tab when import errors are focused)
-        };
+        let border_style = DEFAULT_STYLE.fg(Color::Cyan);
 
         // Create tab title with highlighting
         let tab_title = self.create_tab_title();
@@ -861,6 +853,9 @@ impl DagModel {
             }
             DagPanelTab::Connections => {
                 (self.filtered_connections.items.len(), self.all_connections.len())
+            }
+            DagPanelTab::ImportErrors => {
+                (self.filtered_import_errors.items.len(), self.import_error_list.len())
             }
         };
         
@@ -1087,6 +1082,62 @@ impl DagModel {
                 
                 StatefulWidget::render(t, area, buf, &mut self.filtered_connections.state);
             }
+            DagPanelTab::ImportErrors => {
+                let headers = ["DAG Name", "Error"];
+                let header_row = create_headers(headers);
+                let header = Row::new(header_row)
+                    .style(crate::ui::constants::HEADER_STYLE);
+                let search_term = self.filter.prefix.as_deref();
+                
+                let rows = self.filtered_import_errors.items.iter().enumerate().map(|(idx, item)| {
+                    // Extract DAG name (filename stem without extension)
+                    let dag_name = item.filename.as_ref().and_then(|f| {
+                        std::path::Path::new(f)
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                    }).unwrap_or("-");
+                    
+                    // Get last line of stack trace as error summary
+                    let error_summary = item.stack_trace.as_ref()
+                        .and_then(|st| st.lines().last())
+                        .unwrap_or("-");
+                    
+                    Row::new(vec![
+                        Line::from(highlight_search_term(dag_name, search_term, crate::ui::constants::RED)),
+                        Line::from(error_summary.to_string()),
+                    ])
+                    .style(if (idx % 2) == 0 {
+                        DEFAULT_STYLE
+                    } else {
+                        DEFAULT_STYLE.bg(ALTERNATING_ROW_COLOR)
+                    })
+                });
+                
+                let t = Table::new(
+                    rows,
+                    &[
+                        Constraint::Fill(1),
+                        Constraint::Fill(3),
+                    ],
+                )
+                .header(header)
+                .block(
+                    Block::default()
+                        .border_type(BorderType::Rounded)
+                        .borders(Borders::ALL)
+                        .title(tab_title)
+                        .title_bottom(Line::from(vec![
+                            Span::styled(count_text, Style::default()),
+                            Span::raw(" "),
+                            Span::styled("Press <?> for commands", Style::default().fg(Color::DarkGray)),
+                        ]))
+                        .border_style(DEFAULT_STYLE.fg(crate::ui::constants::RED))
+                        .style(DEFAULT_STYLE),
+                )
+                .row_highlight_style(selected_style);
+                
+                StatefulWidget::render(t, area, buf, &mut self.filtered_import_errors.state);
+            }
         }
     }
 }
@@ -1094,7 +1145,7 @@ impl DagModel {
 impl Widget for &mut DagModel {
     fn render(self, area: Rect, buf: &mut Buffer) {
         // Handle filter at bottom if enabled
-        let base_area = if self.filter.is_enabled() {
+        let main_area = if self.filter.is_enabled() {
             let rects = Layout::default()
                 .constraints([Constraint::Fill(90), Constraint::Max(3)].as_ref())
                 .margin(0)
@@ -1106,48 +1157,6 @@ impl Widget for &mut DagModel {
             area
         };
 
-        // Split into ImportErrors section (always visible) and main tabbed container
-        let (errors_area, main_area) = if self.import_errors.cached_lines.is_some() {
-            let rects = Layout::default()
-                .constraints([Constraint::Length(IMPORT_ERRORS_PANEL_HEIGHT), Constraint::Min(0)].as_ref())
-                .split(base_area);
-            (Some(rects[0]), rects[1])
-        } else {
-            (None, base_area)
-        };
-
-        // Render ImportErrors section if available (separate container, always visible)
-        if let (Some(errors_area), Some(cached_lines)) = (errors_area, &self.import_errors.cached_lines) {
-            let border_style = if self.active_tab == DagPanelTab::Dags && self.focused_section == DagFocusedSection::ImportErrors {
-                DEFAULT_STYLE.fg(Color::Cyan) // Highlight when focused
-            } else {
-                DEFAULT_STYLE.fg(crate::ui::constants::RED) // Red border when not focused
-            };
-
-            let errors_block = Block::default()
-                .border_type(BorderType::Rounded)
-                .borders(Borders::ALL)
-                .title(format!("Import Errors ({})", self.import_error_count))
-                .border_style(border_style)
-                .style(DEFAULT_STYLE)
-                .title_style(DEFAULT_STYLE.fg(crate::ui::constants::RED).add_modifier(Modifier::BOLD));
-
-            let errors_text = Paragraph::new(cached_lines.clone())
-                .block(errors_block)
-                .style(DEFAULT_STYLE)
-                .wrap(Wrap { trim: false })
-                .scroll((self.import_errors.vertical_scroll as u16, 0));
-
-            errors_text.render(errors_area, buf);
-
-            // Render scrollbar for errors section
-            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(Some("↑"))
-                .end_symbol(Some("↓"));
-            let mut scrollbar_state = self.import_errors.vertical_scroll_state.clone();
-            scrollbar.render(errors_area, buf, &mut scrollbar_state);
-        }
-        
         // Render the main tabbed container (single container with tabs in title)
         self.render_tabbed_container(main_area, buf);
 
@@ -1188,68 +1197,6 @@ fn convert_datetimeoffset_to_human_readable_remaining_time(dt: OffsetDateTime) -
         3600..=86_399 => format!("{hours}h {minutes:02}m"),
         _ => format!("{days}d {hours:02}h {minutes:02}m"),
     }
-}
-
-/// Format import errors for display in the ImportErrors panel
-fn format_import_errors(errors: &[ImportError]) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    
-    if errors.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "No import errors",
-            Style::default().fg(Color::DarkGray),
-        )));
-        return lines;
-    }
-    
-    for (i, error) in errors.iter().enumerate() {
-        // Error header with filename
-        let filename = error.filename.as_deref().unwrap_or("Unknown file");
-        lines.push(Line::from(Span::styled(
-            format!("═══ Error {} of {} ═══", i + 1, errors.len()),
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        )));
-        
-        lines.push(Line::from(vec![
-            Span::styled("File: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(filename.to_string()),
-        ]));
-        
-        // Timestamp
-        if let Some(ts) = &error.timestamp {
-            lines.push(Line::from(vec![
-                Span::styled("Time: ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(ts.to_string()),
-            ]));
-        }
-        
-        lines.push(Line::from("")); // Separator
-        
-        // Stack trace
-        lines.push(Line::from(Span::styled(
-            "Stack Trace:",
-            Style::default().add_modifier(Modifier::BOLD).add_modifier(Modifier::UNDERLINED),
-        )));
-        
-        if let Some(stack) = &error.stack_trace {
-            for line in stack.lines() {
-                lines.push(Line::from(line.to_string()));
-            }
-        } else {
-            lines.push(Line::from(Span::styled(
-                "No stack trace available",
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-        
-        // Add spacing between errors
-        if i < errors.len() - 1 {
-            lines.push(Line::from(""));
-            lines.push(Line::from(""));
-        }
-    }
-    
-    lines
 }
 
 #[cfg(test)]
