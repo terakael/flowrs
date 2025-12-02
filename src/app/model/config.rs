@@ -14,7 +14,7 @@ use crate::ui::constants::{ALTERNATING_ROW_COLOR, DEFAULT_STYLE};
 use super::popup::commands_help::CommandPopUp;
 use super::popup::config::commands::CONFIG_COMMAND_POP_UP;
 use super::popup::error::ErrorPopup;
-use super::{filter::Filter, Model, StatefulTable};
+use super::{filter::Filter, Model, StatefulTable, handle_table_scroll_keys};
 use crate::ui::common::create_headers;
 
 pub struct ConfigModel {
@@ -92,13 +92,12 @@ impl Model for ConfigModel {
                         _ => (),
                     }
                 } else {
+                    // Handle standard scrolling keybinds
+                    if handle_table_scroll_keys(&mut self.filtered, key_event) {
+                        return (None, vec![]);
+                    }
+                    
                     match key_event.code {
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            self.filtered.next();
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            self.filtered.previous();
-                        }
                         KeyCode::Char('/') => {
                             self.filter.toggle();
                         }

@@ -19,7 +19,7 @@ use crate::ui::constants::{ALTERNATING_ROW_COLOR, DEFAULT_STYLE};
 
 use super::popup::commands_help::CommandPopUp;
 use super::popup::error::ErrorPopup;
-use super::{filter::Filter, Model, StatefulTable};
+use super::{filter::Filter, Model, StatefulTable, handle_table_scroll_keys, handle_vertical_scroll_keys};
 use crate::app::worker::{OpenItem, WorkerMessage};
 
 // Constants for DAG health monitoring and UI layout
@@ -397,37 +397,27 @@ impl Model for DagModel {
                         _ => (),
                     }
                 } else {
+                    // Handle scrolling based on focused section
+                    let handled = match self.focused_section {
+                        DagFocusedSection::ImportErrors => {
+                            let max_lines = self.import_errors.cached_lines.as_ref().map(|lines| lines.len());
+                            handle_vertical_scroll_keys(
+                                &mut self.import_errors.vertical_scroll,
+                                &mut self.import_errors.vertical_scroll_state,
+                                key_event,
+                                max_lines,
+                            )
+                        }
+                        DagFocusedSection::DagTable => {
+                            handle_table_scroll_keys(&mut self.filtered, key_event)
+                        }
+                    };
+                    
+                    if handled {
+                        return (None, vec![]);
+                    }
+                    
                     match key_event.code {
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            // Handle scrolling based on focused section
-                            match self.focused_section {
-                                DagFocusedSection::ImportErrors => {
-                                    if let Some(cached_lines) = &self.import_errors.cached_lines {
-                                        if self.import_errors.vertical_scroll < cached_lines.len().saturating_sub(1) {
-                                            self.import_errors.vertical_scroll += 1;
-                                            self.import_errors.vertical_scroll_state = self.import_errors.vertical_scroll_state.position(self.import_errors.vertical_scroll);
-                                        }
-                                    }
-                                }
-                                DagFocusedSection::DagTable => {
-                                    self.filtered.next();
-                                }
-                            }
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            // Handle scrolling based on focused section
-                            match self.focused_section {
-                                DagFocusedSection::ImportErrors => {
-                                    if self.import_errors.vertical_scroll > 0 {
-                                        self.import_errors.vertical_scroll -= 1;
-                                        self.import_errors.vertical_scroll_state = self.import_errors.vertical_scroll_state.position(self.import_errors.vertical_scroll);
-                                    }
-                                }
-                                DagFocusedSection::DagTable => {
-                                    self.filtered.previous();
-                                }
-                            }
-                        }
                         KeyCode::Char('J') => {
                             // Switch focus to DAG table (down)
                             self.focused_section = DagFocusedSection::DagTable;

@@ -21,7 +21,7 @@ use crate::ui::constants::{AirflowStateColor, ALTERNATING_ROW_COLOR, DEFAULT_STY
 use super::popup::taskinstances::clear::ClearTaskInstancePopup;
 use super::popup::taskinstances::mark::MarkTaskInstancePopup;
 use super::popup::taskinstances::TaskInstancePopUp;
-use super::{filter::Filter, Model, StatefulTable};
+use super::{filter::Filter, Model, StatefulTable, handle_table_scroll_keys};
 use crate::app::worker::{OpenItem, WorkerMessage};
 
 pub struct TaskInstanceModel {
@@ -152,13 +152,12 @@ impl Model for TaskInstanceModel {
                         }
                     }
                 } else {
+                    // Handle standard scrolling keybinds
+                    if handle_table_scroll_keys(&mut self.filtered, key_event) {
+                        return (None, vec![]);
+                    }
+                    
                     match key_event.code {
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            self.filtered.next();
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            self.filtered.previous();
-                        }
                         KeyCode::Char('G') => {
                             self.filtered.state.select_last();
                         }

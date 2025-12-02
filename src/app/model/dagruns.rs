@@ -27,7 +27,7 @@ use super::popup::dagruns::DagRunPopUp;
 use super::popup::error::ErrorPopup;
 use super::popup::popup_area;
 use super::popup::{dagruns::clear::ClearDagRunPopup, dagruns::mark::MarkDagRunPopup};
-use super::{filter::Filter, Model, StatefulTable};
+use super::{filter::Filter, Model, StatefulTable, handle_table_scroll_keys, handle_vertical_scroll_keys};
 use crate::app::worker::{OpenItem, WorkerMessage};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -315,59 +315,46 @@ impl Model for DagRunModel {
                         }
                     }
                 } else if self.dag_code.cached_lines.is_some() {
+                    // Handle scrolling in code view
+                    let max_lines = self.dag_code.cached_lines.as_ref().map(|lines| lines.len());
+                    if handle_vertical_scroll_keys(
+                        &mut self.dag_code.vertical_scroll,
+                        &mut self.dag_code.vertical_scroll_state,
+                        key_event,
+                        max_lines,
+                    ) {
+                        return (None, vec![]);
+                    }
+                    
                     match key_event.code {
                         KeyCode::Esc | KeyCode::Char('q' | 'v') | KeyCode::Enter => {
                             self.dag_code.clear();
                             return (None, vec![]);
                         }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            self.dag_code.vertical_scroll =
-                                self.dag_code.vertical_scroll.saturating_add(1);
-                            self.dag_code.vertical_scroll_state = self
-                                .dag_code
-                                .vertical_scroll_state
-                                .position(self.dag_code.vertical_scroll);
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            self.dag_code.vertical_scroll =
-                                self.dag_code.vertical_scroll.saturating_sub(1);
-                            self.dag_code.vertical_scroll_state = self
-                                .dag_code
-                                .vertical_scroll_state
-                                .position(self.dag_code.vertical_scroll);
-                        }
                         _ => {}
                     }
                 } else {
+                    // Handle scrolling based on focused section
+                    let handled = match self.focused_section {
+                        DagRunFocusedSection::InfoSection => {
+                            let max_lines = self.dag_info.cached_lines.as_ref().map(|lines| lines.len());
+                            handle_vertical_scroll_keys(
+                                &mut self.dag_info.vertical_scroll,
+                                &mut self.dag_info.vertical_scroll_state,
+                                key_event,
+                                max_lines,
+                            )
+                        }
+                        DagRunFocusedSection::DagRunsTable => {
+                            handle_table_scroll_keys(&mut self.filtered, key_event)
+                        }
+                    };
+                    
+                    if handled {
+                        return (None, vec![]);
+                    }
+                    
                     match key_event.code {
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            match self.focused_section {
-                                DagRunFocusedSection::InfoSection => {
-                                    if let Some(lines) = &self.dag_info.cached_lines {
-                                        let max_scroll = lines.len().saturating_sub(1);
-                                        self.dag_info.vertical_scroll = 
-                                            self.dag_info.vertical_scroll.saturating_add(1).min(max_scroll);
-                                        self.dag_info.vertical_scroll_state = 
-                                            self.dag_info.vertical_scroll_state.position(self.dag_info.vertical_scroll);
-                                    }
-                                }
-                                DagRunFocusedSection::DagRunsTable => {
-                                    self.filtered.next();
-                                }
-                            }
-                        }
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            match self.focused_section {
-                                DagRunFocusedSection::InfoSection => {
-                                    self.dag_info.vertical_scroll = self.dag_info.vertical_scroll.saturating_sub(1);
-                                    self.dag_info.vertical_scroll_state = 
-                                        self.dag_info.vertical_scroll_state.position(self.dag_info.vertical_scroll);
-                                }
-                                DagRunFocusedSection::DagRunsTable => {
-                                    self.filtered.previous();
-                                }
-                            }
-                        }
                         KeyCode::Char('K') => {
                             // Switch focus to Info section (up)
                             if self.dag_info.cached_lines.is_some() {

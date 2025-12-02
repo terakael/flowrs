@@ -186,7 +186,7 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: Arc<Mutex<App>
             if let FlowrsEvent::Key(key) = event {
                 // Handle exit key events
                 if key.modifiers == KeyModifiers::CONTROL {
-                    if let KeyCode::Char('c' | 'd') = key.code {
+                    if let KeyCode::Char('c') = key.code {
                         return Ok(());
                     }
                 }

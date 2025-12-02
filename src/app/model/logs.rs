@@ -21,7 +21,7 @@ use crate::{
 };
 
 use super::popup::error::ErrorPopup;
-use super::Model;
+use super::{Model, handle_vertical_scroll_keys};
 
 pub struct LogModel {
     pub dag_id: Option<String>,
@@ -77,6 +77,17 @@ impl Model for LogModel {
                     }
                     return (None, vec![]);
                 }
+                
+                // Handle standard scrolling keybinds
+                if handle_vertical_scroll_keys(
+                    &mut self.vertical_scroll,
+                    &mut self.vertical_scroll_state,
+                    key,
+                    None,
+                ) {
+                    return (None, vec![]);
+                }
+                
                 match key.code {
                     KeyCode::Char('l') | KeyCode::Right => {
                         if !self.all.is_empty() {
@@ -95,16 +106,6 @@ impl Model for LogModel {
                                 self.current -= 1;
                             }
                         }
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        self.vertical_scroll = self.vertical_scroll.saturating_add(1);
-                        self.vertical_scroll_state =
-                            self.vertical_scroll_state.position(self.vertical_scroll);
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        self.vertical_scroll = self.vertical_scroll.saturating_sub(1);
-                        self.vertical_scroll_state =
-                            self.vertical_scroll_state.position(self.vertical_scroll);
                     }
                     KeyCode::Char('o') => {
                         if self.all.get(self.current % self.all.len()).is_some() {
