@@ -12,7 +12,7 @@ use time::OffsetDateTime;
 use crate::airflow::model::common::{Connection, Dag, DagRun, DagStatistic, ImportError, Variable};
 use crate::app::events::custom::FlowrsEvent;
 use crate::app::model::popup::dags::commands::create_dag_command_popup;
-use crate::ui::common::{hash_to_color, highlight_search_text};
+use crate::ui::common::{get_state_icon, hash_to_color, highlight_search_text};
 use crate::ui::constants::{ALTERNATING_ROW_COLOR, DEFAULT_STYLE, HEADER_STYLE, RED};
 
 use super::popup::commands_help::CommandPopUp;
@@ -431,6 +431,23 @@ impl DagModel {
         } else {
             Color::Reset  // No run data
         }
+    }
+
+    /// Get DAG state icon based on latest run state
+    /// Uses shared utility to determine icon (▶ for running, ■ for others)
+    fn get_dag_icon(&self, dag: &Dag) -> &'static str {
+        if dag.is_paused {
+            return get_state_icon(None);  // Paused DAGs get default icon
+        }
+
+        if let Some(runs) = self.recent_runs.get(&dag.dag_id) {
+            if !runs.is_empty() {
+                let latest_run = &runs[0];
+                return get_state_icon(Some(&latest_run.state));
+            }
+        }
+        
+        get_state_icon(None)  // No run data
     }
 
     /// Analyze recent runs to determine DAG health color
@@ -1035,6 +1052,7 @@ impl DagModel {
                 let rows =
                     self.filtered.items.iter().enumerate().map(|(idx, item)| {
                         let color = self.get_dag_color(item);
+                        let icon = self.get_dag_icon(item);
                         let text_color = if item.is_paused {
                             Color::DarkGray
                         } else {
@@ -1042,7 +1060,7 @@ impl DagModel {
                         };
                         
                         Row::new(vec![
-                            Line::from(Span::styled("■", Style::default().fg(color))),
+                            Line::from(Span::styled(icon, Style::default().fg(color))),
                             Line::from(highlight_search_text(&item.dag_id, search_term, text_color)),
                             {
                                 let schedule = item.timetable_description.as_deref().unwrap_or("None");

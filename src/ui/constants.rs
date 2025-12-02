@@ -51,6 +51,10 @@ pub const HEADER_STYLE: Style = Style {
 pub const ALTERNATING_ROW_COLOR: Color = Color::Rgb(0x2d, 0x2b, 0x29); // Slightly lighter than background
 pub const MARKED_COLOR: Color = YELLOW; // Use theme yellow for marked items
 
+// State icon constants
+pub const RUNNING_STATE_ICON: &str = "▶";  // Play symbol for running states
+pub const DEFAULT_STATE_ICON: &str = "■";  // Square for all other states
+
 pub const ASCII_LOGO: &str = include_str!("logo/logo.ascii");
 
 pub const ROTATING_LOGO: [&str; 16] = [

@@ -8,14 +8,15 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use log::debug;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
-
-use ratatui::text::Line;
+use ratatui::style::Color;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Row, StatefulWidget, Table, Widget};
 
 use crate::airflow::graph_layout::GraphPrefix;
 use crate::airflow::model::common::TaskInstance;
 use crate::app::events::custom::FlowrsEvent;
-use crate::ui::constants::{AirflowStateColor, ALTERNATING_ROW_COLOR, DEFAULT_STYLE, HEADER_STYLE, MARKED_COLOR, RED};
+use crate::ui::common::format_duration_seconds;
+use crate::ui::constants::{AirflowStateColor, ALTERNATING_ROW_COLOR, CYAN, DEFAULT_STYLE, HEADER_STYLE, MARKED_COLOR, RED};
 
 use super::popup::taskinstances::clear::ClearTaskInstancePopup;
 use super::popup::taskinstances::mark::MarkTaskInstancePopup;
@@ -426,11 +427,7 @@ impl Widget for &mut TaskInstanceModel {
             Row::new(vec![
                 Line::from(graph_prefix),
                 Line::from(item.task_id.as_str()),
-                Line::from(if let Some(duration) = item.duration {
-                    format!("{}", duration.ceil() as i64)
-                } else {
-                    "None".to_string()
-                }),
+                Line::from(format_duration_seconds(item.duration)),
                 Line::from(state_text),
                 Line::from(format!("{:?}", item.try_number)),
             ])
@@ -446,6 +443,16 @@ impl Widget for &mut TaskInstanceModel {
                 base_style.fg(state_color.into())
             })
         });
+        // Create title with DAG name in cyan (matching focused panel color)
+        let title = if let Some(dag_id) = &self.dag_id {
+            Line::from(vec![
+                Span::styled("TaskInstances - ", DEFAULT_STYLE.fg(CYAN)),
+                Span::styled(dag_id, DEFAULT_STYLE.fg(CYAN)),
+            ])
+        } else {
+            Line::from(Span::styled("TaskInstances", DEFAULT_STYLE.fg(CYAN)))
+        };
+        
         let t = Table::new(
             rows,
             &[
@@ -461,7 +468,11 @@ impl Widget for &mut TaskInstanceModel {
             Block::default()
                 .border_type(BorderType::Rounded)
                 .borders(Borders::ALL)
-                .title("TaskInstances - Press <?> to see available commands"),
+                .title(title)
+                .title_bottom(Line::from(vec![
+                    Span::styled("Press <?> for commands", DEFAULT_STYLE.fg(Color::DarkGray)),
+                ]))
+                .border_style(DEFAULT_STYLE.fg(CYAN)),
         )
         .style(DEFAULT_STYLE)
         .row_highlight_style(selected_style);

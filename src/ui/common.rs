@@ -5,7 +5,7 @@ use ratatui::{
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use super::constants::{AirflowStateColor, BLACK, BRIGHT_YELLOW, HEADER_STYLE};
+use super::constants::{AirflowStateColor, BLACK, BRIGHT_YELLOW, DEFAULT_STATE_ICON, HEADER_STYLE, RUNNING_STATE_ICON};
 
 pub fn create_headers<'a>(
     headers: impl IntoIterator<Item = &'a str>,
@@ -16,7 +16,25 @@ pub fn create_headers<'a>(
 }
 
 pub fn state_to_colored_square<'a>(color: AirflowStateColor) -> Span<'a> {
-    Span::styled("■", Style::default().fg(color.into()))
+    Span::styled(DEFAULT_STATE_ICON, Style::default().fg(color.into()))
+}
+
+/// Get state icon based on state string
+/// 
+/// Returns a play symbol (▶) for running states and a square (■) for all other states.
+/// This provides consistent visual indication of active execution across the UI.
+/// 
+/// # Arguments
+/// * `state` - Optional state string (e.g., "running", "success", "failed")
+/// 
+/// # Returns
+/// * `RUNNING_STATE_ICON` ("▶") if state is "running"
+/// * `DEFAULT_STATE_ICON` ("■") for all other states or None
+pub fn get_state_icon(state: Option<&str>) -> &'static str {
+    match state {
+        Some("running") => RUNNING_STATE_ICON,
+        _ => DEFAULT_STATE_ICON,
+    }
 }
 
 /// Map a string to a consistent color using hash-based mapping.
@@ -117,4 +135,54 @@ pub fn highlight_search_text<'a>(text: &'a str, search: Option<&str>, base_color
     }
     
     spans
+}
+
+/// Format duration from start and end dates to human-readable format
+/// 
+/// Returns formats like "2h 15m 30s", "5m 45s", or "30s" depending on magnitude.
+/// Returns "Running" if end is None (task still running) or if duration is negative.
+/// Returns "-" if start is None.
+pub fn format_duration(start_date: Option<time::OffsetDateTime>, end_date: Option<time::OffsetDateTime>) -> String {
+    match (start_date, end_date) {
+        (Some(start), Some(end)) => {
+            let duration = end - start;
+            let total_seconds = duration.whole_seconds();
+            
+            if total_seconds < 0 {
+                return "Running".to_string();
+            }
+            
+            format_seconds(total_seconds)
+        }
+        (Some(_), None) => "Running".to_string(),
+        _ => "-".to_string(),
+    }
+}
+
+/// Format duration in seconds (as f64) to human-readable format
+/// 
+/// Returns formats like "2h 15m 30s", "5m 45s", or "30s" depending on magnitude.
+/// Returns "-" if duration is None or negative.
+pub fn format_duration_seconds(duration_seconds: Option<f64>) -> String {
+    match duration_seconds {
+        Some(duration) if duration >= 0.0 => {
+            format_seconds(duration as i64)
+        }
+        _ => "-".to_string(),
+    }
+}
+
+/// Internal helper to format seconds into human-readable string
+fn format_seconds(total_seconds: i64) -> String {
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    
+    if hours > 0 {
+        format!("{}h {}m {}s", hours, minutes, seconds)
+    } else if minutes > 0 {
+        format!("{}m {}s", minutes, seconds)
+    } else {
+        format!("{}s", seconds)
+    }
 }

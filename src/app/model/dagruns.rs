@@ -16,7 +16,8 @@ use time::format_description;
 
 use crate::airflow::model::common::DagRun;
 use crate::app::events::custom::FlowrsEvent;
-use crate::ui::constants::{AirflowStateColor, ALTERNATING_ROW_COLOR, DEFAULT_STYLE, HEADER_STYLE, MARKED_COLOR, RED};
+use crate::ui::common::format_duration;
+use crate::ui::constants::{AirflowStateColor, ALTERNATING_ROW_COLOR, DEFAULT_STATE_ICON, DEFAULT_STYLE, HEADER_STYLE, MARKED_COLOR, RED, RUNNING_STATE_ICON};
 use crate::ui::TIME_FORMAT;
 
 use super::popup::commands_help::CommandPopUp;
@@ -728,18 +729,18 @@ impl Widget for &mut DagRunModel {
             Row::new(vec![
                 Line::from(match item.state.as_str() {
                     "success" => {
-                        Span::styled("■", Style::default().fg(AirflowStateColor::Success.into()))
+                        Span::styled(DEFAULT_STATE_ICON, Style::default().fg(AirflowStateColor::Success.into()))
                     }
                     "running" => {
-                        Span::styled("■", DEFAULT_STYLE.fg(AirflowStateColor::Running.into()))
+                        Span::styled(RUNNING_STATE_ICON, DEFAULT_STYLE.fg(AirflowStateColor::Running.into()))
                     }
                     "failed" => {
-                        Span::styled("■", DEFAULT_STYLE.fg(AirflowStateColor::Failed.into()))
+                        Span::styled(DEFAULT_STATE_ICON, DEFAULT_STYLE.fg(AirflowStateColor::Failed.into()))
                     }
                     "queued" => {
-                        Span::styled("■", DEFAULT_STYLE.fg(AirflowStateColor::Queued.into()))
+                        Span::styled(DEFAULT_STATE_ICON, DEFAULT_STYLE.fg(AirflowStateColor::Queued.into()))
                     }
-                    _ => Span::styled("■", DEFAULT_STYLE.fg(AirflowStateColor::None.into())),
+                    _ => Span::styled(DEFAULT_STATE_ICON, DEFAULT_STYLE.fg(AirflowStateColor::None.into())),
                 }),
                 Line::from(Span::styled(
                     item.dag_run_id.as_str(),
@@ -917,32 +918,4 @@ fn code_to_lines(dag_code: &str) -> Vec<Line<'static>> {
         lines.push(Line::from(line_spans));
     }
     lines
-}
-
-/// Format duration between start and end dates
-fn format_duration(start_date: Option<time::OffsetDateTime>, end_date: Option<time::OffsetDateTime>) -> String {
-    match (start_date, end_date) {
-        (Some(start), Some(end)) => {
-            let duration = end - start;
-            let total_seconds = duration.whole_seconds();
-            
-            if total_seconds < 0 {
-                return "Running".to_string();
-            }
-            
-            let hours = total_seconds / 3600;
-            let minutes = (total_seconds % 3600) / 60;
-            let seconds = total_seconds % 60;
-            
-            if hours > 0 {
-                format!("{}h {}m {}s", hours, minutes, seconds)
-            } else if minutes > 0 {
-                format!("{}m {}s", minutes, seconds)
-            } else {
-                format!("{}s", seconds)
-            }
-        }
-        (Some(_), None) => "Running".to_string(),
-        _ => "-".to_string(),
-    }
 }
