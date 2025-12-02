@@ -62,8 +62,14 @@ pub struct FlowrsConfig {
     pub servers: Option<Vec<AirflowConfig>>,
     pub managed_services: Option<Vec<ManagedService>>,
     pub active_server: Option<String>,
+    #[serde(default = "default_show_init_screen")]
+    pub show_init_screen: bool,
     #[serde(skip_serializing)]
     pub path: Option<PathBuf>,
+}
+
+fn default_show_init_screen() -> bool {
+    true
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -135,6 +141,7 @@ impl FlowrsConfig {
             servers: None,
             managed_services: None,
             active_server: None,
+            show_init_screen: true,
             path: Some(CONFIG_FILE.as_path().to_path_buf()),
         }
     }
@@ -285,6 +292,7 @@ mod tests {
 
     const TEST_CONFIG_CONVEYOR: &str = r#"
 managed_services = ["Conveyor"]
+show_init_screen = true
 
 [[servers]]
 name = "bla"
@@ -319,6 +327,7 @@ password = "airflow"
             }]),
             managed_services: Some(vec![ManagedService::Conveyor]),
             active_server: None,
+            show_init_screen: true,
             path: None,
         };
 
@@ -397,6 +406,7 @@ password = "airflow"
             }]),
             managed_services: None,
             active_server: None,
+            show_init_screen: true,
             path: None,
         };
 

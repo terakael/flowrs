@@ -16,7 +16,7 @@ pub const TIME_FORMAT: &str = "[year]-[month]-[day] [hour]:[minute]:[second]";
 
 pub fn draw_ui(f: &mut Frame, app: &Arc<Mutex<App>>) {
     let mut app = app.lock().unwrap();
-    if app.startup && app.ticks <= 10 {
+    if app.config.show_init_screen && app.startup && app.ticks <= 10 {
         render_init_screen(f, app.ticks);
         return;
     }
