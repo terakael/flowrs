@@ -10,6 +10,7 @@ pub mod detail;
 pub mod filter;
 pub mod logs;
 pub mod popup;
+pub mod sortable_table;
 pub mod taskinstances;
 
 pub trait Model {

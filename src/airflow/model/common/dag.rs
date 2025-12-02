@@ -28,6 +28,11 @@ pub struct Dag {
     pub tags: Vec<Tag>,
     pub file_token: String,
     pub timetable_description: Option<String>,
+    
+    /// Computed state priority for sorting (lower = higher priority)
+    /// 0: Failed, 1: Running, 2: Recent failed (recovered), 3: Success, 4: Unknown, 5: Paused
+    #[serde(skip)]
+    pub computed_state_priority: Option<u8>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -71,6 +76,7 @@ impl From<v1::model::dag::DagResponse> for Dag {
                 .collect(),
             file_token: value.file_token.clone(),
             timetable_description: value.timetable_description.clone(),
+            computed_state_priority: None,
         }
     }
 }
@@ -115,6 +121,7 @@ impl From<v2::model::dag::Dag> for Dag {
             tags: value.tags.into_iter().map(std::convert::Into::into).collect(),
             file_token: value.file_token,
             timetable_description: value.timetable_description,
+            computed_state_priority: None,
         }
     }
 }

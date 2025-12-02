@@ -4,7 +4,7 @@ use std::vec;
 use super::popup::commands_help::CommandPopUp;
 use super::popup::error::ErrorPopup;
 use super::popup::taskinstances::commands::create_task_command_popup;
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
 use log::debug;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -15,20 +15,89 @@ use ratatui::widgets::{Block, BorderType, Borders, Row, StatefulWidget, Table, W
 use crate::airflow::graph_layout::GraphPrefix;
 use crate::airflow::model::common::TaskInstance;
 use crate::app::events::custom::FlowrsEvent;
-use crate::ui::common::create_headers;
-use crate::ui::constants::{AirflowStateColor, ALTERNATING_ROW_COLOR, DEFAULT_STYLE, MARKED_COLOR};
+use crate::ui::constants::{AirflowStateColor, ALTERNATING_ROW_COLOR, DEFAULT_STYLE, HEADER_STYLE, MARKED_COLOR, RED};
 
 use super::popup::taskinstances::clear::ClearTaskInstancePopup;
 use super::popup::taskinstances::mark::MarkTaskInstancePopup;
 use super::popup::taskinstances::TaskInstancePopUp;
-use super::{filter::Filter, handle_command_popup_events, Model, StatefulTable, handle_table_scroll_keys};
+use super::sortable_table::{CustomSort, SortableTable};
+use super::{filter::Filter, handle_command_popup_events, Model, HALF_PAGE_SIZE};
 use crate::app::worker::{OpenItem, WorkerMessage};
+use std::cmp::Ordering;
+
+// Implement CustomSort for TaskInstance
+impl CustomSort for TaskInstance {
+    fn column_value(&self, column_index: usize) -> String {
+        match column_index {
+            0 => self.map_index.to_string(), // Graph (map_index)
+            1 => self.task_id.clone(), // Task ID
+            2 => {
+                // Duration
+                match (&self.start_date, &self.end_date) {
+                    (Some(start), Some(end)) => {
+                        let duration = *end - *start;
+                        duration.whole_seconds().to_string()
+                    }
+                    _ => String::new(),
+                }
+            }
+            3 => self.state.as_ref().map(|s| s.clone()).unwrap_or_default(), // State
+            4 => self.try_number.to_string(), // Tries
+            _ => String::new(),
+        }
+    }
+    
+    fn comparator(column_index: usize) -> Option<fn(&Self, &Self) -> Ordering> {
+        match column_index {
+            0 => Some(|a: &TaskInstance, b: &TaskInstance| {
+                // Sort by map_index numerically
+                a.map_index.cmp(&b.map_index)
+            }),
+            2 => Some(|a: &TaskInstance, b: &TaskInstance| {
+                // Sort by duration numerically
+                let duration_a = match (&a.start_date, &a.end_date) {
+                    (Some(start), Some(end)) => Some((*end - *start).whole_seconds()),
+                    _ => None,
+                };
+                let duration_b = match (&b.start_date, &b.end_date) {
+                    (Some(start), Some(end)) => Some((*end - *start).whole_seconds()),
+                    _ => None,
+                };
+                match (duration_a, duration_b) {
+                    (Some(da), Some(db)) => da.cmp(&db),
+                    (Some(_), None) => Ordering::Less,
+                    (None, Some(_)) => Ordering::Greater,
+                    (None, None) => Ordering::Equal,
+                }
+            }),
+            3 => Some(|a: &TaskInstance, b: &TaskInstance| {
+                // Sort states meaningfully
+                let state_priority = |state: Option<&String>| {
+                    match state.map(|s| s.as_str()) {
+                        Some("failed") | Some("Failed") => 0,
+                        Some("running") | Some("Running") => 1,
+                        Some("success") | Some("Success") => 2,
+                        Some("queued") | Some("Queued") => 3,
+                        Some("scheduled") | Some("Scheduled") => 4,
+                        _ => 5,
+                    }
+                };
+                state_priority(a.state.as_ref()).cmp(&state_priority(b.state.as_ref()))
+            }),
+            4 => Some(|a: &TaskInstance, b: &TaskInstance| {
+                // Sort tries numerically
+                a.try_number.cmp(&b.try_number)
+            }),
+            _ => None,
+        }
+    }
+}
 
 pub struct TaskInstanceModel {
     pub dag_id: Option<String>,
     pub dag_run_id: Option<String>,
     pub all: Vec<TaskInstance>,
-    pub filtered: StatefulTable<TaskInstance>,
+    pub filtered: SortableTable<TaskInstance>,
     pub filter: Filter,
     pub popup: Option<TaskInstancePopUp>,
     pub marked: Vec<usize>,
@@ -41,11 +110,14 @@ pub struct TaskInstanceModel {
 
 impl TaskInstanceModel {
     pub fn new() -> Self {
+        let headers = ["Graph", "Task ID", "Duration", "State", "Tries"];
+        // Reserved keys: j/k (scroll), g/G (jump), m (mark), c (clear), o (open), ? (help), / (filter)
+        let reserved = &['j', 'k', 'g', 'G', 'm', 'c', 'o', '?', '/'];
         TaskInstanceModel {
             dag_id: None,
             dag_run_id: None,
             all: vec![],
-            filtered: StatefulTable::new(vec![]),
+            filtered: SortableTable::new(&headers, vec![], reserved),
             filter: Filter::new(),
             popup: None,
             marked: vec![],
@@ -69,6 +141,8 @@ impl TaskInstanceModel {
             None => &self.all,
         };
         self.filtered.items = filtered_task_instances.clone();
+        // Reapply current sort if any
+        self.filtered.reapply_sort();
     }
 
     #[allow(dead_code)]
@@ -147,9 +221,40 @@ impl Model for TaskInstanceModel {
                         }
                     }
                 } else {
-                    // Handle standard scrolling keybinds
-                    if handle_table_scroll_keys(&mut self.filtered, key_event) {
-                        return (None, vec![]);
+                    // Handle Ctrl+D and Ctrl+U for half-page scrolling
+                    if key_event.modifiers == KeyModifiers::CONTROL {
+                        match key_event.code {
+                            KeyCode::Char('d') => {
+                                self.filtered.scroll_by(HALF_PAGE_SIZE as isize);
+                                return (None, vec![]);
+                            }
+                            KeyCode::Char('u') => {
+                                self.filtered.scroll_by(-(HALF_PAGE_SIZE as isize));
+                                return (None, vec![]);
+                            }
+                            _ => {}
+                        }
+                    }
+                    
+                    // Handle scrolling
+                    match key_event.code {
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            self.filtered.scroll_by(1);
+                            return (None, vec![]);
+                        }
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            self.filtered.scroll_by(-1);
+                            return (None, vec![]);
+                        }
+                        KeyCode::Char(c) => {
+                            // Try to handle as sort key (only if no modifiers pressed)
+                            if key_event.modifiers == KeyModifiers::NONE && self.filtered.handle_key(c) {
+                                // Re-filter to apply default sort if sort was cleared
+                                self.filter_task_instances();
+                                return (None, vec![]);
+                            }
+                        }
+                        _ => {}
                     }
                     
                     match key_event.code {
@@ -287,10 +392,9 @@ impl Widget for &mut TaskInstanceModel {
 
         let selected_style = crate::ui::constants::SELECTED_STYLE;
 
-        let headers = ["Graph", "Task ID", "Duration", "State", "Tries"];
-        let header_row = create_headers(headers);
-        let header =
-            Row::new(header_row).style(crate::ui::constants::HEADER_STYLE);
+        // Automatically generated sortable headers
+        let header_row = self.filtered.render_headers(HEADER_STYLE, RED);
+        let header = Row::new(header_row).style(HEADER_STYLE);
 
         let rows = self.filtered.items.iter().enumerate().map(|(idx, item)| {
             // Get graph prefix for this task (depth-based indentation)

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
 use log::debug;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
@@ -12,19 +12,29 @@ use time::OffsetDateTime;
 use crate::airflow::model::common::{Connection, Dag, DagRun, DagStatistic, ImportError, Variable};
 use crate::app::events::custom::FlowrsEvent;
 use crate::app::model::popup::dags::commands::create_dag_command_popup;
-use crate::ui::common::{create_headers, hash_to_color, highlight_search_text};
-use crate::ui::constants::{ALTERNATING_ROW_COLOR, DEFAULT_STYLE};
+use crate::ui::common::{hash_to_color, highlight_search_text};
+use crate::ui::constants::{ALTERNATING_ROW_COLOR, DEFAULT_STYLE, HEADER_STYLE, RED};
 
 use super::popup::commands_help::CommandPopUp;
 use super::popup::error::ErrorPopup;
-use super::{filter::Filter, handle_command_popup_events, Model, StatefulTable, handle_table_scroll_keys};
+use super::sortable_table::{CustomSort, SortableTable};
+use super::{filter::Filter, handle_command_popup_events, Model, HALF_PAGE_SIZE};
 use crate::app::worker::{OpenItem, WorkerMessage};
+use std::cmp::Ordering;
 
 // Constants for DAG health monitoring and UI layout
 /// Number of recent runs to analyze for DAG health indicators
 pub const RECENT_RUNS_HEALTH_WINDOW: usize = 7;
 /// Width of the state column (for colored square indicator)
 const STATE_COLUMN_WIDTH: u16 = 5;
+
+// State priority constants for sorting (lower = higher urgency)
+const PRIORITY_FAILED: u8 = 0;      // Failed - requires immediate attention
+const PRIORITY_RUNNING: u8 = 1;     // Currently running
+const PRIORITY_RECOVERED: u8 = 2;   // Recently failed but recovered
+const PRIORITY_SUCCESS: u8 = 3;     // All runs successful
+const PRIORITY_UNKNOWN: u8 = 4;     // No run data available
+const PRIORITY_PAUSED: u8 = 5;      // Paused DAGs (lowest priority)
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DagPanelTab {
@@ -42,6 +52,94 @@ pub enum LoadingStatus {
     Complete,
 }
 
+// CustomSort implementations for DAG panel tables
+
+impl CustomSort for Dag {
+    fn column_value(&self, column_index: usize) -> String {
+        match column_index {
+            0 => if self.is_paused { "paused" } else { "active" }.to_string(), // State
+            1 => self.dag_id.clone(), // Name
+            2 => self.timetable_description.clone().unwrap_or_default(), // Schedule
+            3 => self.next_dagrun_logical_date.map(|d| d.to_string()).unwrap_or_default(), // Next Run
+            4 => self.tags.first().map(|t| t.name.clone()).unwrap_or_default(), // Tags
+            _ => String::new(),
+        }
+    }
+    
+    fn comparator(column_index: usize) -> Option<fn(&Self, &Self) -> Ordering> {
+        match column_index {
+            0 => Some(|a: &Dag, b: &Dag| {
+                // Sort by computed state priority (lower priority value = higher urgency)
+                let priority_a = a.computed_state_priority.unwrap_or(255);
+                let priority_b = b.computed_state_priority.unwrap_or(255);
+                priority_a.cmp(&priority_b)
+            }),
+            3 => Some(|a: &Dag, b: &Dag| {
+                // Sort by next run time - soonest runs first (ascending)
+                match (&a.next_dagrun_logical_date, &b.next_dagrun_logical_date) {
+                    (Some(date_a), Some(date_b)) => date_a.cmp(date_b),
+                    (Some(_), None) => Ordering::Less,  // DAGs with next run come first
+                    (None, Some(_)) => Ordering::Greater,  // DAGs without next run come last
+                    (None, None) => Ordering::Equal,
+                }
+            }),
+            _ => None,
+        }
+    }
+}
+
+impl CustomSort for Variable {
+    fn column_value(&self, column_index: usize) -> String {
+        match column_index {
+            0 => self.key.clone(), // Key
+            1 => self.value.clone().unwrap_or_default(), // Value
+            _ => String::new(),
+        }
+    }
+}
+
+impl CustomSort for Connection {
+    fn column_value(&self, column_index: usize) -> String {
+        match column_index {
+            0 => self.connection_id.clone(), // ID
+            1 => self.conn_type.clone(), // Type
+            2 => self.host.clone().unwrap_or_default(), // Host
+            3 => self.login.clone().unwrap_or_default(), // Login
+            4 => self.schema.clone().unwrap_or_default(), // Schema
+            5 => self.port.map(|p| p.to_string()).unwrap_or_default(), // Port
+            _ => String::new(),
+        }
+    }
+    
+    fn comparator(column_index: usize) -> Option<fn(&Self, &Self) -> Ordering> {
+        match column_index {
+            5 => Some(|a: &Connection, b: &Connection| {
+                // Sort port numerically
+                a.port.cmp(&b.port)
+            }),
+            _ => None,
+        }
+    }
+}
+
+impl CustomSort for ImportError {
+    fn column_value(&self, column_index: usize) -> String {
+        match column_index {
+            0 => {
+                // DAG Name from filename
+                self.filename.as_ref().and_then(|f| {
+                    std::path::Path::new(f)
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_string())
+                }).unwrap_or_default()
+            }
+            1 => self.stack_trace.clone().unwrap_or_default(), // Error
+            _ => String::new(),
+        }
+    }
+}
+
 pub struct DagModel {
     // Tab state
     pub active_tab: DagPanelTab,
@@ -50,23 +148,23 @@ pub struct DagModel {
     pub all: Vec<Dag>,
     pub dag_stats: HashMap<String, Vec<DagStatistic>>,
     pub recent_runs: HashMap<String, Vec<DagRun>>,  // Store recent runs for each DAG
-    pub filtered: StatefulTable<Dag>,
+    pub filtered: SortableTable<Dag>,
     pub filter: Filter,
     pub show_paused: bool,
     pub import_error_list: Vec<ImportError>,
     
     // Variables tab data
     pub all_variables: Vec<Variable>,
-    pub filtered_variables: StatefulTable<Variable>,
+    pub filtered_variables: SortableTable<Variable>,
     pub selected_variable: Option<Variable>,
     
     // Connections tab data
     pub all_connections: Vec<Connection>,
-    pub filtered_connections: StatefulTable<Connection>,
+    pub filtered_connections: SortableTable<Connection>,
     pub selected_connection: Option<Connection>,
     
     // Import errors tab data
-    pub filtered_import_errors: StatefulTable<ImportError>,
+    pub filtered_import_errors: SortableTable<ImportError>,
     
     // State preservation for detail views
     pub saved_tab: Option<DagPanelTab>,
@@ -84,6 +182,10 @@ pub struct DagModel {
 
 impl DagModel {
     pub fn new() -> Self {
+        // Reserved keys across all DAG panel tabs: j/k (scroll), g/G (jump), H/L (tab nav), 
+        // p (pause toggle), o (open), r (refresh), ? (help), / (filter)
+        let reserved = &['j', 'k', 'g', 'G', 'H', 'L', 'p', 'o', 'r', '?', '/'];
+        
         DagModel {
             // Tab state - start on DAGs tab
             active_tab: DagPanelTab::Dags,
@@ -92,23 +194,23 @@ impl DagModel {
             all: vec![],
             dag_stats: HashMap::new(),
             recent_runs: HashMap::new(),
-            filtered: StatefulTable::new(vec![]),
+            filtered: SortableTable::new(&["State", "Name", "Schedule", "Next Run", "Tags"], vec![], reserved),
             filter: Filter::new(),
             show_paused: false,
             import_error_list: vec![],
             
             // Variables tab data
             all_variables: vec![],
-            filtered_variables: StatefulTable::new(vec![]),
+            filtered_variables: SortableTable::new(&["Key", "Value (Preview)"], vec![], reserved),
             selected_variable: None,
             
             // Connections tab data
             all_connections: vec![],
-            filtered_connections: StatefulTable::new(vec![]),
+            filtered_connections: SortableTable::new(&["ID", "Type", "Host", "Login", "Schema", "Port"], vec![], reserved),
             selected_connection: None,
             
             // Import errors tab data
-            filtered_import_errors: StatefulTable::new(vec![]),
+            filtered_import_errors: SortableTable::new(&["DAG Name", "Error"], vec![], reserved),
             
             // State preservation for detail views
             saved_tab: None,
@@ -150,10 +252,18 @@ impl DagModel {
             filtered_dags.retain(|dag| !dag.is_paused);
         }
         
-        // Step 3: Sort - Alphabetically by DAG name (paused and unpaused interleaved)
+        // Step 3: Compute state priority for each DAG (for sorting)
+        for dag in &mut filtered_dags {
+            dag.computed_state_priority = Some(self.compute_state_priority(dag));
+        }
+        
+        // Step 4: Sort - Alphabetically by DAG name (paused and unpaused interleaved)
+        // This is the default sort when no column sort is active
         filtered_dags.sort_by(|a, b| a.dag_id.cmp(&b.dag_id));
         
         self.filtered.items = filtered_dags;
+        // Reapply current sort if any
+        self.filtered.reapply_sort();
     }
 
     pub fn filter_variables(&mut self) {
@@ -171,10 +281,12 @@ impl DagModel {
             None => self.all_variables.clone(),
         };
         
-        // Sort alphabetically by key
+        // Sort alphabetically by key (default sort)
         filtered_variables.sort_by(|a, b| a.key.cmp(&b.key));
         
         self.filtered_variables.items = filtered_variables;
+        // Reapply current sort if any
+        self.filtered_variables.reapply_sort();
     }
 
     pub fn filter_connections(&mut self) {
@@ -196,10 +308,12 @@ impl DagModel {
             None => self.all_connections.clone(),
         };
         
-        // Sort alphabetically by connection_id
+        // Sort alphabetically by connection_id (default sort)
         filtered_connections.sort_by(|a, b| a.connection_id.cmp(&b.connection_id));
         
         self.filtered_connections.items = filtered_connections;
+        // Reapply current sort if any
+        self.filtered_connections.reapply_sort();
     }
 
     pub fn filter_import_errors(&mut self) {
@@ -235,12 +349,14 @@ impl DagModel {
             None => self.import_error_list.clone(),
         };
         
-        // Sort by timestamp (newest first)
+        // Sort by timestamp (newest first) - default sort
         filtered_import_errors.sort_by(|a, b| {
             b.timestamp.cmp(&a.timestamp)
         });
         
         self.filtered_import_errors.items = filtered_import_errors;
+        // Reapply current sort if any
+        self.filtered_import_errors.reapply_sort();
     }
 
     pub fn current(&mut self) -> Option<&mut Dag> {
@@ -353,6 +469,42 @@ impl DagModel {
             .take(RECENT_RUNS_HEALTH_WINDOW - 1)  // Check past runs (excluding latest)
             .any(|run| Self::is_failed_state(&run.state))
     }
+
+    /// Compute state priority for sorting
+    /// Lower values = higher priority (more urgent to address)
+    fn compute_state_priority(&self, dag: &Dag) -> u8 {
+        if dag.is_paused {
+            return PRIORITY_PAUSED;
+        }
+
+        if let Some(runs) = self.recent_runs.get(&dag.dag_id) {
+            if runs.is_empty() {
+                return PRIORITY_UNKNOWN;
+            }
+
+            let latest_run = &runs[0];
+            
+            if Self::is_failed_state(&latest_run.state) {
+                return PRIORITY_FAILED;
+            }
+
+            if latest_run.state == "running" {
+                return PRIORITY_RUNNING;
+            }
+
+            if matches!(latest_run.state.as_str(), "success" | "queued" | "scheduled") {
+                if Self::has_recent_failures(&runs[1..]) {
+                    return PRIORITY_RECOVERED;
+                } else {
+                    return PRIORITY_SUCCESS;
+                }
+            }
+
+            return PRIORITY_UNKNOWN;
+        }
+        
+        PRIORITY_UNKNOWN
+    }
 }
 
 impl Default for DagModel {
@@ -446,24 +598,93 @@ impl Model for DagModel {
                 } else if self.commands.is_some() {
                     return handle_command_popup_events(&mut self.commands, key_event);
                 } else {
+                    // Handle Ctrl+D and Ctrl+U for half-page scrolling
+                    if key_event.modifiers == KeyModifiers::CONTROL {
+                        match key_event.code {
+                            KeyCode::Char('d') => {
+                                match self.active_tab {
+                                    DagPanelTab::Dags => self.filtered.scroll_by(HALF_PAGE_SIZE as isize),
+                                    DagPanelTab::Variables => self.filtered_variables.scroll_by(HALF_PAGE_SIZE as isize),
+                                    DagPanelTab::Connections => self.filtered_connections.scroll_by(HALF_PAGE_SIZE as isize),
+                                    DagPanelTab::ImportErrors => self.filtered_import_errors.scroll_by(HALF_PAGE_SIZE as isize),
+                                }
+                                return (None, vec![]);
+                            }
+                            KeyCode::Char('u') => {
+                                match self.active_tab {
+                                    DagPanelTab::Dags => self.filtered.scroll_by(-(HALF_PAGE_SIZE as isize)),
+                                    DagPanelTab::Variables => self.filtered_variables.scroll_by(-(HALF_PAGE_SIZE as isize)),
+                                    DagPanelTab::Connections => self.filtered_connections.scroll_by(-(HALF_PAGE_SIZE as isize)),
+                                    DagPanelTab::ImportErrors => self.filtered_import_errors.scroll_by(-(HALF_PAGE_SIZE as isize)),
+                                }
+                                return (None, vec![]);
+                            }
+                            _ => {}
+                        }
+                    }
+                    
                     // Handle scrolling based on active tab
-                    let handled = match self.active_tab {
-                        DagPanelTab::Dags => {
-                            handle_table_scroll_keys(&mut self.filtered, key_event)
+                    let handled = match (key_event.code, &mut self.active_tab) {
+                        (KeyCode::Down | KeyCode::Char('j'), DagPanelTab::Dags) => {
+                            self.filtered.scroll_by(1);
+                            true
                         }
-                        DagPanelTab::Variables => {
-                            handle_table_scroll_keys(&mut self.filtered_variables, key_event)
+                        (KeyCode::Up | KeyCode::Char('k'), DagPanelTab::Dags) => {
+                            self.filtered.scroll_by(-1);
+                            true
                         }
-                        DagPanelTab::Connections => {
-                            handle_table_scroll_keys(&mut self.filtered_connections, key_event)
+                        (KeyCode::Down | KeyCode::Char('j'), DagPanelTab::Variables) => {
+                            self.filtered_variables.scroll_by(1);
+                            true
                         }
-                        DagPanelTab::ImportErrors => {
-                            handle_table_scroll_keys(&mut self.filtered_import_errors, key_event)
+                        (KeyCode::Up | KeyCode::Char('k'), DagPanelTab::Variables) => {
+                            self.filtered_variables.scroll_by(-1);
+                            true
                         }
+                        (KeyCode::Down | KeyCode::Char('j'), DagPanelTab::Connections) => {
+                            self.filtered_connections.scroll_by(1);
+                            true
+                        }
+                        (KeyCode::Up | KeyCode::Char('k'), DagPanelTab::Connections) => {
+                            self.filtered_connections.scroll_by(-1);
+                            true
+                        }
+                        (KeyCode::Down | KeyCode::Char('j'), DagPanelTab::ImportErrors) => {
+                            self.filtered_import_errors.scroll_by(1);
+                            true
+                        }
+                        (KeyCode::Up | KeyCode::Char('k'), DagPanelTab::ImportErrors) => {
+                            self.filtered_import_errors.scroll_by(-1);
+                            true
+                        }
+                        _ => false,
                     };
                     
                     if handled {
                         return (None, vec![]);
+                    }
+                    
+                    // Handle sort keys based on active tab (only if no modifiers pressed)
+                    if key_event.modifiers == KeyModifiers::NONE {
+                        if let KeyCode::Char(c) = key_event.code {
+                            let sort_handled = match self.active_tab {
+                                DagPanelTab::Dags => self.filtered.handle_key(c),
+                                DagPanelTab::Variables => self.filtered_variables.handle_key(c),
+                                DagPanelTab::Connections => self.filtered_connections.handle_key(c),
+                                DagPanelTab::ImportErrors => self.filtered_import_errors.handle_key(c),
+                            };
+                            
+                            if sort_handled {
+                                // Re-filter to apply default sort if sort was cleared
+                                match self.active_tab {
+                                    DagPanelTab::Dags => self.filter_dags(),
+                                    DagPanelTab::Variables => self.filter_variables(),
+                                    DagPanelTab::Connections => self.filter_connections(),
+                                    DagPanelTab::ImportErrors => self.filter_import_errors(),
+                                }
+                                return (None, vec![]);
+                            }
+                        }
                     }
                     
                     match key_event.code {
@@ -808,10 +1029,8 @@ impl DagModel {
         // Render appropriate table based on active tab
         match self.active_tab {
             DagPanelTab::Dags => {
-                let headers = ["State", "Name", "Schedule", "Next Run", "Tags"];
-                let header_row = create_headers(headers);
-                let header = Row::new(header_row)
-                    .style(crate::ui::constants::HEADER_STYLE);
+                let header_row = self.filtered.render_headers(HEADER_STYLE, RED);
+                let header = Row::new(header_row).style(HEADER_STYLE);
                 let search_term = self.filter.prefix.as_deref();
                 let rows =
                     self.filtered.items.iter().enumerate().map(|(idx, item)| {
@@ -905,10 +1124,8 @@ impl DagModel {
                 StatefulWidget::render(t, area, buf, &mut self.filtered.state);
             }
             DagPanelTab::Variables => {
-                let headers = ["Key", "Value (Preview)"];
-                let header_row = create_headers(headers);
-                let header = Row::new(header_row)
-                    .style(crate::ui::constants::HEADER_STYLE);
+                let header_row = self.filtered_variables.render_headers(HEADER_STYLE, RED);
+                let header = Row::new(header_row).style(HEADER_STYLE);
                 let search_term = self.filter.prefix.as_deref();
                 
                 let rows = self.filtered_variables.items.iter().enumerate().map(|(idx, item)| {
@@ -965,10 +1182,8 @@ impl DagModel {
                 StatefulWidget::render(t, area, buf, &mut self.filtered_variables.state);
             }
             DagPanelTab::Connections => {
-                let headers = ["ID", "Type", "Host", "Login", "Schema", "Port"];
-                let header_row = create_headers(headers);
-                let header = Row::new(header_row)
-                    .style(crate::ui::constants::HEADER_STYLE);
+                let header_row = self.filtered_connections.render_headers(HEADER_STYLE, RED);
+                let header = Row::new(header_row).style(HEADER_STYLE);
                 let search_term = self.filter.prefix.as_deref();
                 
                 let rows = self.filtered_connections.items.iter().enumerate().map(|(idx, item)| {
@@ -1020,10 +1235,8 @@ impl DagModel {
                 StatefulWidget::render(t, area, buf, &mut self.filtered_connections.state);
             }
             DagPanelTab::ImportErrors => {
-                let headers = ["DAG Name", "Error"];
-                let header_row = create_headers(headers);
-                let header = Row::new(header_row)
-                    .style(crate::ui::constants::HEADER_STYLE);
+                let header_row = self.filtered_import_errors.render_headers(HEADER_STYLE, RED);
+                let header = Row::new(header_row).style(HEADER_STYLE);
                 let search_term = self.filter.prefix.as_deref();
                 
                 let rows = self.filtered_import_errors.items.iter().enumerate().map(|(idx, item)| {

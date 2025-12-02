@@ -1,4 +1,4 @@
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
 use log::debug;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -9,17 +9,33 @@ use ratatui::widgets::{Block, BorderType, Borders, Row, StatefulWidget, Table, W
 use crate::airflow::config::AirflowConfig;
 use crate::app::events::custom::FlowrsEvent;
 use crate::app::worker::{OpenItem, WorkerMessage};
-use crate::ui::constants::{ALTERNATING_ROW_COLOR, DEFAULT_STYLE};
+use crate::ui::constants::{ALTERNATING_ROW_COLOR, DEFAULT_STYLE, HEADER_STYLE, RED};
 
 use super::popup::commands_help::CommandPopUp;
 use super::popup::config::commands::create_config_command_popup;
 use super::popup::error::ErrorPopup;
-use super::{filter::Filter, handle_command_popup_events, handle_table_scroll_keys, Model, StatefulTable};
-use crate::ui::common::create_headers;
+use super::sortable_table::{CustomSort, SortableTable};
+use super::{filter::Filter, handle_command_popup_events, Model, HALF_PAGE_SIZE};
+
+// Implement CustomSort for AirflowConfig
+impl CustomSort for AirflowConfig {
+    fn column_value(&self, column_index: usize) -> String {
+        match column_index {
+            0 => self.name.clone(),
+            1 => self.endpoint.clone(),
+            2 => self.managed.as_ref().map(|m| m.to_string()).unwrap_or_else(|| "None".to_string()),
+            3 => match self.version {
+                crate::airflow::config::AirflowVersion::V2 => "v2".to_string(),
+                crate::airflow::config::AirflowVersion::V3 => "v3".to_string(),
+            },
+            _ => String::new(),
+        }
+    }
+}
 
 pub struct ConfigModel {
     pub all: Vec<AirflowConfig>,
-    pub filtered: StatefulTable<AirflowConfig>,
+    pub filtered: SortableTable<AirflowConfig>,
     pub filter: Filter,
     pub commands: Option<CommandPopUp<'static>>,
     pub error_popup: Option<ErrorPopup>,
@@ -27,9 +43,12 @@ pub struct ConfigModel {
 
 impl ConfigModel {
     pub fn new(configs: Vec<AirflowConfig>) -> Self {
+        let headers = ["Name", "Endpoint", "Managed", "Version"];
+        // Reserved keys: j/k (scroll), o (open), ? (help), / (filter), q (quit)
+        let reserved = &['j', 'k', 'o', '?', '/', 'q'];
         ConfigModel {
             all: configs.clone(),
-            filtered: StatefulTable::new(configs),
+            filtered: SortableTable::new(&headers, configs, reserved),
             filter: Filter::new(),
             commands: None,
             error_popup: None,
@@ -43,9 +62,11 @@ impl ConfigModel {
             Some(ErrorPopup::from_strings(errors))
         };
 
+        let headers = ["Name", "Endpoint", "Managed", "Version"];
+        let reserved = &['j', 'k', 'o', '?', '/', 'q'];
         ConfigModel {
             all: configs.clone(),
-            filtered: StatefulTable::new(configs),
+            filtered: SortableTable::new(&headers, configs, reserved),
             filter: Filter::new(),
             commands: None,
             error_popup,
@@ -65,6 +86,8 @@ impl ConfigModel {
             None => dags.clone(),
         };
         self.filtered.items = filtered_configs;
+        // Reapply current sort after filtering
+        self.filtered.reapply_sort();
     }
 }
 
@@ -87,26 +110,58 @@ impl Model for ConfigModel {
                 } else if self.commands.is_some() {
                     return handle_command_popup_events(&mut self.commands, key_event);
                 } else {
-                    // Handle standard scrolling keybinds
-                    if handle_table_scroll_keys(&mut self.filtered, key_event) {
-                        return (None, vec![]);
+                    // Handle Ctrl+D and Ctrl+U for half-page scrolling
+                    if key_event.modifiers == KeyModifiers::CONTROL {
+                        match key_event.code {
+                            KeyCode::Char('d') => {
+                                self.filtered.scroll_by(HALF_PAGE_SIZE as isize);
+                                return (None, vec![]);
+                            }
+                            KeyCode::Char('u') => {
+                                self.filtered.scroll_by(-(HALF_PAGE_SIZE as isize));
+                                return (None, vec![]);
+                            }
+                            _ => {}
+                        }
                     }
                     
+                    // Handle scrolling and sorting
                     match key_event.code {
-                        KeyCode::Char('/') => {
-                            self.filter.toggle();
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            self.filtered.scroll_by(1);
+                            return (None, vec![]);
                         }
-                        KeyCode::Char('o') => {
-                            let selected_config =
-                                self.filtered.state.selected().unwrap_or_default();
-                            let endpoint = self.filtered.items[selected_config].endpoint.clone();
-                            return (
-                                Some(event.clone()),
-                                vec![WorkerMessage::OpenItem(OpenItem::Config(endpoint))],
-                            );
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            self.filtered.scroll_by(-1);
+                            return (None, vec![]);
                         }
-                        KeyCode::Char('?') => {
-                            self.commands = Some(create_config_command_popup());
+                        KeyCode::Char(c) => {
+                            // Try to handle as sort key (only if no modifiers pressed)
+                            if key_event.modifiers == KeyModifiers::NONE && self.filtered.handle_key(c) {
+                                // Re-filter to apply default sort if sort was cleared
+                                self.filter_configs();
+                                return (None, vec![]);
+                            }
+                            
+                            // Otherwise handle specific commands
+                            match c {
+                                '/' => {
+                                    self.filter.toggle();
+                                }
+                                'o' => {
+                                    let selected_config =
+                                        self.filtered.state.selected().unwrap_or_default();
+                                    let endpoint = self.filtered.items[selected_config].endpoint.clone();
+                                    return (
+                                        Some(event.clone()),
+                                        vec![WorkerMessage::OpenItem(OpenItem::Config(endpoint))],
+                                    );
+                                }
+                                '?' => {
+                                    self.commands = Some(create_config_command_popup());
+                                }
+                                _ => {}
+                            }
                         }
                         KeyCode::Enter => {
                             let selected_config =
@@ -151,11 +206,9 @@ impl Widget for &mut ConfigModel {
         };
         let selected_style = crate::ui::constants::SELECTED_STYLE;
 
-        let headers = ["Name", "Endpoint", "Managed", "Version"];
-        let header_row = create_headers(headers);
-
-        let header =
-            Row::new(header_row).style(crate::ui::constants::HEADER_STYLE);
+        // Automatically generated sortable headers
+        let header_row = self.filtered.render_headers(HEADER_STYLE, RED);
+        let header = Row::new(header_row).style(HEADER_STYLE);
 
         let rows = self.filtered.items.iter().enumerate().map(|(idx, item)| {
             Row::new(vec![

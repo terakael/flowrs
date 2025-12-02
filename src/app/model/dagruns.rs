@@ -1,4 +1,4 @@
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
 use log::debug;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
@@ -16,8 +16,7 @@ use time::format_description;
 
 use crate::airflow::model::common::DagRun;
 use crate::app::events::custom::FlowrsEvent;
-use crate::ui::common::create_headers;
-use crate::ui::constants::{AirflowStateColor, ALTERNATING_ROW_COLOR, DEFAULT_STYLE, MARKED_COLOR};
+use crate::ui::constants::{AirflowStateColor, ALTERNATING_ROW_COLOR, DEFAULT_STYLE, HEADER_STYLE, MARKED_COLOR, RED};
 use crate::ui::TIME_FORMAT;
 
 use super::popup::commands_help::CommandPopUp;
@@ -27,8 +26,10 @@ use super::popup::dagruns::DagRunPopUp;
 use super::popup::error::ErrorPopup;
 use super::popup::popup_area;
 use super::popup::{dagruns::clear::ClearDagRunPopup, dagruns::mark::MarkDagRunPopup};
-use super::{filter::Filter, handle_command_popup_events, Model, StatefulTable, handle_table_scroll_keys, handle_vertical_scroll_keys};
+use super::sortable_table::{CustomSort, SortableTable};
+use super::{filter::Filter, handle_command_popup_events, handle_vertical_scroll_keys, Model, HALF_PAGE_SIZE};
 use crate::app::worker::{OpenItem, WorkerMessage};
+use std::cmp::Ordering;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DagRunFocusedSection {
@@ -91,6 +92,73 @@ impl DagInfoWidget {
     }
 }
 
+// Implement CustomSort for DagRun
+impl CustomSort for DagRun {
+    fn column_value(&self, column_index: usize) -> String {
+        match column_index {
+            0 => self.state.clone(), // State
+            1 => self.dag_run_id.clone(), // DAG Run ID
+            2 => self.logical_date.map(|d| d.to_string()).unwrap_or_default(), // Logical Date
+            3 => {
+                // Duration - calculate from start/end dates
+                match (&self.start_date, &self.end_date) {
+                    (Some(start), Some(end)) => {
+                        let duration = *end - *start;
+                        duration.whole_seconds().to_string()
+                    }
+                    _ => String::new(),
+                }
+            }
+            _ => String::new(),
+        }
+    }
+    
+    // Custom comparator for better state ordering and duration sorting
+    fn comparator(column_index: usize) -> Option<fn(&Self, &Self) -> Ordering> {
+        match column_index {
+            0 => Some(|a: &DagRun, b: &DagRun| {
+                // Sort states in a meaningful order: failed, running, success, queued, etc.
+                let state_priority = |state: &str| match state.to_lowercase().as_str() {
+                    "failed" => 0,
+                    "running" => 1,
+                    "success" => 2,
+                    "queued" => 3,
+                    "scheduled" => 4,
+                    _ => 5,
+                };
+                state_priority(&a.state).cmp(&state_priority(&b.state))
+            }),
+            2 => Some(|a: &DagRun, b: &DagRun| {
+                // Sort dates properly (not as strings)
+                match (&a.logical_date, &b.logical_date) {
+                    (Some(da), Some(db)) => da.cmp(db),
+                    (Some(_), None) => Ordering::Less,
+                    (None, Some(_)) => Ordering::Greater,
+                    (None, None) => Ordering::Equal,
+                }
+            }),
+            3 => Some(|a: &DagRun, b: &DagRun| {
+                // Sort by actual duration (numeric)
+                let duration_a = match (&a.start_date, &a.end_date) {
+                    (Some(start), Some(end)) => Some((*end - *start).whole_seconds()),
+                    _ => None,
+                };
+                let duration_b = match (&b.start_date, &b.end_date) {
+                    (Some(start), Some(end)) => Some((*end - *start).whole_seconds()),
+                    _ => None,
+                };
+                match (duration_a, duration_b) {
+                    (Some(da), Some(db)) => da.cmp(&db),
+                    (Some(_), None) => Ordering::Less,
+                    (None, Some(_)) => Ordering::Greater,
+                    (None, None) => Ordering::Equal,
+                }
+            }),
+            _ => None,
+        }
+    }
+}
+
 pub struct DagRunModel {
     pub dag_id: Option<String>,
     pub dag_details: Option<crate::airflow::model::common::Dag>,
@@ -98,7 +166,7 @@ pub struct DagRunModel {
     pub dag_code: DagCodeWidget,
     pub focused_section: DagRunFocusedSection,
     pub all: Vec<DagRun>,
-    pub filtered: StatefulTable<DagRun>,
+    pub filtered: SortableTable<DagRun>,
     pub filter: Filter,
     pub marked: Vec<usize>,
     pub popup: Option<DagRunPopUp>,
@@ -113,6 +181,9 @@ pub struct DagRunModel {
 
 impl DagRunModel {
     pub fn new() -> Self {
+        let headers = ["State", "DAG Run ID", "Logical Date", "Duration"];
+        // Reserved keys: j/k (scroll), g/G (jump), K/J (focus), m (mark), c (clear), t (trigger), o (open), ? (help), / (filter)
+        let reserved = &['j', 'k', 'g', 'G', 'K', 'J', 'm', 'c', 't', 'o', '?', '/'];
         DagRunModel {
             dag_id: None,
             dag_details: None,
@@ -120,7 +191,7 @@ impl DagRunModel {
             dag_code: DagCodeWidget::default(),
             focused_section: DagRunFocusedSection::DagRunsTable,
             all: vec![],
-            filtered: StatefulTable::new(vec![]),
+            filtered: SortableTable::new(&headers, vec![], reserved),
             filter: Filter::new(),
             marked: vec![],
             popup: None,
@@ -149,9 +220,11 @@ impl DagRunModel {
                 .collect::<Vec<DagRun>>(),
             None => self.all.clone(),
         };
-        // Sort by start_date in descending order (most recent first)
+        // Sort by start_date in descending order (most recent first) - default sort
         filtered_dag_runs.sort_by(|a, b| b.start_date.cmp(&a.start_date));
         self.filtered.items = filtered_dag_runs;
+        // Reapply current sort if any
+        self.filtered.reapply_sort();
         
         if reset_page {
             // Reset to first page when filter changes
@@ -340,12 +413,49 @@ impl Model for DagRunModel {
                             )
                         }
                         DagRunFocusedSection::DagRunsTable => {
-                            handle_table_scroll_keys(&mut self.filtered, key_event)
+                            // Handle Ctrl+D/U for half-page scrolling
+                            if key_event.modifiers == KeyModifiers::CONTROL {
+                                match key_event.code {
+                                    KeyCode::Char('d') => {
+                                        self.filtered.scroll_by(HALF_PAGE_SIZE as isize);
+                                        return (None, vec![]);
+                                    }
+                                    KeyCode::Char('u') => {
+                                        self.filtered.scroll_by(-(HALF_PAGE_SIZE as isize));
+                                        return (None, vec![]);
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            
+                            // Handle scrolling
+                            match key_event.code {
+                                KeyCode::Down | KeyCode::Char('j') => {
+                                    self.filtered.scroll_by(1);
+                                    true
+                                }
+                                KeyCode::Up | KeyCode::Char('k') => {
+                                    self.filtered.scroll_by(-1);
+                                    true
+                                }
+                                _ => false,
+                            }
                         }
                     };
                     
                     if handled {
                         return (None, vec![]);
+                    }
+                    
+                    // Handle sort keys for DagRuns table (only if no modifiers pressed)
+                    if self.focused_section == DagRunFocusedSection::DagRunsTable {
+                        if let KeyCode::Char(c) = key_event.code {
+                            if key_event.modifiers == KeyModifiers::NONE && self.filtered.handle_key(c) {
+                                // Re-filter to apply default sort if sort was cleared
+                                self.filter_dag_runs();
+                                return (None, vec![]);
+                            }
+                        }
                     }
                     
                     match key_event.code {
@@ -607,10 +717,9 @@ impl Widget for &mut DagRunModel {
             DEFAULT_STYLE
         };
 
-        let headers = ["State", "DAG Run ID", "Logical Date", "Duration"];
-        let header_row = create_headers(headers);
-        let header =
-            Row::new(header_row).style(crate::ui::constants::HEADER_STYLE);
+        // Automatically generated sortable headers
+        let header_row = self.filtered.render_headers(HEADER_STYLE, RED);
+        let header = Row::new(header_row).style(HEADER_STYLE);
 
         let page_offset = self.current_page * self.page_size;
         let page_end = (page_offset + self.page_size).min(self.filtered.items.len());
