@@ -1,52 +1,146 @@
 use ratatui::{
     buffer::Buffer,
-    layout::Rect,
-    style::{Modifier, Style, Stylize},
-    text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget, Wrap},
+    layout::{Constraint, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, BorderType, Borders, Clear, Row, StatefulWidget, Table, Widget},
 };
 
 use super::popup_area;
+use crate::app::model::{filter::Filter, StatefulTable};
+use crate::ui::common::{create_headers, highlight_search_text};
+use crate::ui::constants::{ALTERNATING_ROW_COLOR, DEFAULT_STYLE, HEADER_STYLE};
 
+#[derive(Clone)]
 pub struct Command<'a> {
     pub name: &'a str,
     pub key_binding: &'a str,
     pub description: &'a str,
 }
+
 pub struct CommandPopUp<'a> {
     pub title: String,
-    pub commands: Vec<Command<'a>>,
+    pub all_commands: Vec<Command<'a>>,
+    pub filtered: StatefulTable<Command<'a>>,
+    pub filter: Filter,
 }
 
-impl Widget for &CommandPopUp<'_> {
+impl<'a> CommandPopUp<'a> {
+    pub fn new(title: String, commands: Vec<Command<'a>>) -> Self {
+        let mut popup = CommandPopUp {
+            title,
+            all_commands: commands.clone(),
+            filtered: StatefulTable::new(commands),
+            filter: Filter::new(),
+        };
+        // Select first item by default (consistent with other tables)
+        if !popup.filtered.items.is_empty() {
+            popup.filtered.state.select(Some(0));
+        }
+        popup
+    }
+
+    pub fn filter_commands(&mut self) {
+        let prefix = &self.filter.prefix;
+        let filtered = match prefix {
+            Some(prefix) => {
+                let lower_prefix = prefix.to_lowercase();
+                self.all_commands
+                    .iter()
+                    .filter(|cmd| {
+                        cmd.key_binding.to_lowercase().contains(&lower_prefix)
+                            || cmd.name.to_lowercase().contains(&lower_prefix)
+                            || cmd.description.to_lowercase().contains(&lower_prefix)
+                    })
+                    .cloned()
+                    .collect()
+            }
+            None => self.all_commands.clone(),
+        };
+        self.filtered.items = filtered;
+        // Maintain selection or select first if current selection is out of bounds
+        if !self.filtered.items.is_empty() {
+            let current = self.filtered.state.selected().unwrap_or(0);
+            if current >= self.filtered.items.len() {
+                self.filtered.state.select(Some(0));
+            }
+        }
+    }
+}
+
+impl Widget for &mut CommandPopUp<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let popup_area = popup_area(area, 80, 80);
-        let popup = Block::default()
-            .border_type(BorderType::Rounded)
-            .title(self.title.as_str())
-            .borders(Borders::ALL);
-
+        
         Clear.render(popup_area, buf);
-
-        let text = self
-            .commands
-            .iter()
-            .map(|c| {
-                Line::from(vec![
-                    Span::styled(
-                        format!("<{}>: ", c.key_binding),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!("{} - {}", c.name, c.description),
-                        Style::default().dark_gray(),
-                    ),
-                ])
+        
+        // Split area for filter if enabled
+        let rects = if self.filter.is_enabled() {
+            let rects = Layout::default()
+                .constraints([Constraint::Fill(90), Constraint::Max(3)])
+                .split(popup_area);
+            self.filter.render(rects[1], buf);
+            rects
+        } else {
+            Layout::default()
+                .constraints([Constraint::Percentage(100)])
+                .split(popup_area)
+        };
+        
+        // Create table headers
+        let headers = ["Key", "Command", "Description"];
+        let header_row = create_headers(headers);
+        let header = Row::new(header_row).style(HEADER_STYLE);
+        
+        // Get current filter text for highlighting
+        let search_text = self.filter.prefix.as_ref().map(String::as_str);
+        
+        // Create table rows with alternating colors and search highlighting
+        let rows = self.filtered.items.iter().enumerate().map(|(idx, cmd)| {
+            Row::new(vec![
+                Line::from(highlight_search_text(cmd.key_binding, search_text, Color::White)),
+                Line::from(highlight_search_text(cmd.name, search_text, Color::White)),
+                Line::from(highlight_search_text(cmd.description, search_text, Color::DarkGray)),
+            ])
+            .style(if (idx % 2) == 0 {
+                DEFAULT_STYLE
+            } else {
+                DEFAULT_STYLE.bg(ALTERNATING_ROW_COLOR)
             })
-            .collect::<Text>();
-
-        let command_paragraph = Paragraph::new(text).wrap(Wrap { trim: true }).block(popup);
-        command_paragraph.render(popup_area, buf);
+        });
+        
+        // Create table
+        let table = Table::new(
+            rows,
+            &[
+                Constraint::Percentage(20),  // Key
+                Constraint::Percentage(25),  // Command
+                Constraint::Percentage(55),  // Description
+            ],
+        )
+        .header(header)
+        .block(
+            Block::default()
+                .border_type(BorderType::Rounded)
+                .borders(Borders::ALL)
+                .title(self.title.as_str())
+                .title_bottom(Line::from(vec![
+                    Span::styled("j/k: scroll", Style::default().fg(Color::DarkGray)),
+                    Span::raw(" | "),
+                    Span::styled("/: filter", Style::default().fg(Color::DarkGray)),
+                    Span::raw(" | "),
+                    Span::styled("Enter/Esc: close", Style::default().fg(Color::DarkGray)),
+                ]))
+        )
+        .style(DEFAULT_STYLE)
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::Rgb(60, 60, 60))
+                .add_modifier(Modifier::BOLD)
+        );
+        
+        // Render as stateful widget
+        StatefulWidget::render(table, rects[0], buf, &mut self.filtered.state);
     }
 }
 

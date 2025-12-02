@@ -5,7 +5,7 @@ use ratatui::{
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use super::constants::{AirflowStateColor, DEFAULT_STYLE, HEADER_STYLE};
+use super::constants::{AirflowStateColor, BRIGHT_YELLOW, DEFAULT_STYLE, HEADER_STYLE};
 
 pub fn create_headers<'a>(
     headers: impl IntoIterator<Item = &'a str>,
@@ -66,4 +66,55 @@ pub fn hash_to_color(input: &str) -> Color {
     let hash = hasher.finish();
     
     COLORS[(hash as usize) % COLORS.len()]
+}
+
+/// Highlight search text with yellow background (case-insensitive matching)
+/// 
+/// Returns a vector of spans where matching portions are highlighted with a yellow background.
+/// Empty text or search strings return a single span with the base color.
+/// If search is None, returns the text with base color.
+pub fn highlight_search_text<'a>(text: &'a str, search: Option<&str>, base_color: Color) -> Vec<Span<'a>> {
+    let Some(search) = search else {
+        return vec![Span::styled(text, Style::default().fg(base_color))];
+    };
+    
+    if text.is_empty() || search.is_empty() {
+        return vec![Span::styled(text, Style::default().fg(base_color))];
+    }
+    
+    let mut spans = Vec::new();
+    let lower_text = text.to_lowercase();
+    let lower_search = search.to_lowercase();
+    let mut last_end = 0;
+    
+    // Find all occurrences (case-insensitive)
+    for (idx, _) in lower_text.match_indices(&lower_search) {
+        // Add non-matching part
+        if idx > last_end {
+            spans.push(Span::styled(
+                &text[last_end..idx],
+                Style::default().fg(base_color),
+            ));
+        }
+        
+        // Add highlighted matching part with yellow background
+        spans.push(Span::styled(
+            &text[idx..idx + search.len()],
+            Style::default()
+                .fg(base_color)
+                .bg(BRIGHT_YELLOW),
+        ));
+        
+        last_end = idx + search.len();
+    }
+    
+    // Add remaining text
+    if last_end < text.len() {
+        spans.push(Span::styled(
+            &text[last_end..],
+            Style::default().fg(base_color),
+        ));
+    }
+    
+    spans
 }

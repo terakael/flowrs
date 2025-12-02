@@ -2,7 +2,7 @@ use crossterm::event::KeyCode;
 use log::debug;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Stylize};
+
 use ratatui::text::Line;
 use ratatui::widgets::{Block, BorderType, Borders, Row, StatefulWidget, Table, Widget};
 
@@ -12,16 +12,16 @@ use crate::app::worker::{OpenItem, WorkerMessage};
 use crate::ui::constants::{ALTERNATING_ROW_COLOR, DEFAULT_STYLE};
 
 use super::popup::commands_help::CommandPopUp;
-use super::popup::config::commands::CONFIG_COMMAND_POP_UP;
+use super::popup::config::commands::create_config_command_popup;
 use super::popup::error::ErrorPopup;
-use super::{filter::Filter, Model, StatefulTable, handle_table_scroll_keys};
+use super::{filter::Filter, handle_command_popup_events, handle_table_scroll_keys, Model, StatefulTable};
 use crate::ui::common::create_headers;
 
 pub struct ConfigModel {
     pub all: Vec<AirflowConfig>,
     pub filtered: StatefulTable<AirflowConfig>,
     pub filter: Filter,
-    pub commands: Option<&'static CommandPopUp<'static>>,
+    pub commands: Option<CommandPopUp<'static>>,
     pub error_popup: Option<ErrorPopup>,
 }
 
@@ -84,13 +84,8 @@ impl Model for ConfigModel {
                         }
                         _ => (),
                     }
-                } else if let Some(_commands) = &mut self.commands {
-                    match key_event.code {
-                        KeyCode::Char('q' | '?') | KeyCode::Esc | KeyCode::Enter => {
-                            self.commands = None;
-                        }
-                        _ => (),
-                    }
+                } else if self.commands.is_some() {
+                    return handle_command_popup_events(&mut self.commands, key_event);
                 } else {
                     // Handle standard scrolling keybinds
                     if handle_table_scroll_keys(&mut self.filtered, key_event) {
@@ -111,7 +106,7 @@ impl Model for ConfigModel {
                             );
                         }
                         KeyCode::Char('?') => {
-                            self.commands = Some(&*CONFIG_COMMAND_POP_UP);
+                            self.commands = Some(create_config_command_popup());
                         }
                         KeyCode::Enter => {
                             let selected_config =
@@ -203,7 +198,7 @@ impl Widget for &mut ConfigModel {
         .row_highlight_style(selected_style);
         StatefulWidget::render(t, rects[0], buf, &mut self.filtered.state);
 
-        if let Some(commands) = &self.commands {
+        if let Some(commands) = &mut self.commands {
             commands.render(area, buf);
         }
 

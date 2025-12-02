@@ -11,13 +11,13 @@ use time::OffsetDateTime;
 
 use crate::airflow::model::common::{Connection, Dag, DagRun, DagStatistic, ImportError, Variable};
 use crate::app::events::custom::FlowrsEvent;
-use crate::app::model::popup::dags::commands::DAG_COMMAND_POP_UP;
-use crate::ui::common::{create_headers, hash_to_color};
+use crate::app::model::popup::dags::commands::create_dag_command_popup;
+use crate::ui::common::{create_headers, hash_to_color, highlight_search_text};
 use crate::ui::constants::{ALTERNATING_ROW_COLOR, DEFAULT_STYLE};
 
 use super::popup::commands_help::CommandPopUp;
 use super::popup::error::ErrorPopup;
-use super::{filter::Filter, Model, StatefulTable, handle_table_scroll_keys};
+use super::{filter::Filter, handle_command_popup_events, Model, StatefulTable, handle_table_scroll_keys};
 use crate::app::worker::{OpenItem, WorkerMessage};
 
 // Constants for DAG health monitoring and UI layout
@@ -75,7 +75,7 @@ pub struct DagModel {
     pub saved_import_error_selection: Option<usize>,
     
     // Shared UI state
-    commands: Option<&'static CommandPopUp<'static>>,
+    commands: Option<CommandPopUp<'static>>,
     pub error_popup: Option<ErrorPopup>,
     pub loading_status: LoadingStatus,
     ticks: u32,
@@ -368,57 +368,7 @@ impl Default for DagModel {
     }
 }
 
-/// Highlight search term occurrences in text with yellow background
-/// Returns a Vec of Spans with matching parts highlighted (case-insensitive search)
-fn highlight_search_term<'a>(
-    text: &'a str,
-    search: Option<&str>,
-    base_color: Color,
-) -> Vec<Span<'a>> {
-    let Some(search) = search else {
-        return vec![Span::styled(text, Style::default().fg(base_color))];
-    };
-    
-    if search.is_empty() {
-        return vec![Span::styled(text, Style::default().fg(base_color))];
-    }
-    
-    let mut spans = Vec::new();
-    let lower_text = text.to_lowercase();
-    let lower_search = search.to_lowercase();
-    let mut last_end = 0;
-    
-    // Find all occurrences (case-insensitive)
-    for (idx, _) in lower_text.match_indices(&lower_search) {
-        // Add non-matching part
-        if idx > last_end {
-            spans.push(Span::styled(
-                &text[last_end..idx],
-                Style::default().fg(base_color),
-            ));
-        }
-        
-        // Add highlighted matching part with yellow background
-        spans.push(Span::styled(
-            &text[idx..idx + search.len()],
-            Style::default()
-                .fg(base_color)
-                .bg(crate::ui::constants::BRIGHT_YELLOW),
-        ));
-        
-        last_end = idx + search.len();
-    }
-    
-    // Add remaining text
-    if last_end < text.len() {
-        spans.push(Span::styled(
-            &text[last_end..],
-            Style::default().fg(base_color),
-        ));
-    }
-    
-    spans
-}
+
 
 impl Model for DagModel {
     fn update(&mut self, event: &FlowrsEvent) -> (Option<FlowrsEvent>, Vec<WorkerMessage>) {
@@ -500,13 +450,8 @@ impl Model for DagModel {
                         _ => (),
                     }
                     return (None, vec![]);
-                } else if let Some(_commands) = &mut self.commands {
-                    match key_event.code {
-                        KeyCode::Char('q' | '?') | KeyCode::Esc => {
-                            self.commands = None;
-                        }
-                        _ => (),
-                    }
+                } else if self.commands.is_some() {
+                    return handle_command_popup_events(&mut self.commands, key_event);
                 } else {
                     // Handle scrolling based on active tab
                     let handled = match self.active_tab {
@@ -635,7 +580,7 @@ impl Model for DagModel {
                             }
                         }
                         KeyCode::Char('?') => {
-                            self.commands = Some(&*DAG_COMMAND_POP_UP);
+                            self.commands = Some(create_dag_command_popup());
                         }
                         KeyCode::Enter => {
                             match self.active_tab {
@@ -782,7 +727,6 @@ impl Model for DagModel {
                     }
                     return (None, vec![]);
                 }
-                (None, vec![])
             }
             FlowrsEvent::Mouse => (Some(event.clone()), vec![]),
         }
@@ -887,7 +831,7 @@ impl DagModel {
                         
                         Row::new(vec![
                             Line::from(Span::styled("■", Style::default().fg(color))),
-                            Line::from(highlight_search_term(&item.dag_id, search_term, text_color)),
+                            Line::from(highlight_search_text(&item.dag_id, search_term, text_color)),
                             {
                                 let schedule = item.timetable_description.as_deref().unwrap_or("None");
                                 let schedule_text = if schedule.starts_with("Never") {
@@ -918,7 +862,7 @@ impl DagModel {
                                             spans.push(Span::raw(", "));
                                         }
                                         let tag_color = hash_to_color(&tag.name);
-                                        let highlighted_spans = highlight_search_term(&tag.name, search_term, tag_color);
+                                        let highlighted_spans = highlight_search_text(&tag.name, search_term, tag_color);
                                         spans.extend(highlighted_spans);
                                     }
                                     Line::from(spans)
@@ -992,7 +936,7 @@ impl DagModel {
                     };
                     
                     Row::new(vec![
-                        Line::from(highlight_search_term(&item.key, search_term, Color::Reset)),
+                        Line::from(highlight_search_text(&item.key, search_term, Color::Reset)),
                         Line::from(Span::styled(value_display, Style::default().fg(Color::DarkGray))),
                     ])
                     .style(if (idx % 2) == 0 {
@@ -1039,8 +983,8 @@ impl DagModel {
                     let type_color = hash_to_color(&item.conn_type);
                     
                     Row::new(vec![
-                        Line::from(highlight_search_term(&item.connection_id, search_term, Color::Reset)),
-                        Line::from(highlight_search_term(&item.conn_type, search_term, type_color)),
+                        Line::from(highlight_search_text(&item.connection_id, search_term, Color::Reset)),
+                        Line::from(highlight_search_text(&item.conn_type, search_term, type_color)),
                         Line::from(item.host.as_deref().unwrap_or("-")),
                         Line::from(item.login.as_deref().unwrap_or("-")),
                         Line::from(item.schema.as_deref().unwrap_or("-")),
@@ -1103,7 +1047,7 @@ impl DagModel {
                         .unwrap_or("-");
                     
                     Row::new(vec![
-                        Line::from(highlight_search_term(dag_name, search_term, crate::ui::constants::RED)),
+                        Line::from(highlight_search_text(dag_name, search_term, crate::ui::constants::RED)),
                         Line::from(error_summary.to_string()),
                     ])
                     .style(if (idx % 2) == 0 {
@@ -1161,7 +1105,7 @@ impl Widget for &mut DagModel {
         self.render_tabbed_container(main_area, buf);
 
         // Render popups (they float over everything)
-        if let Some(commands) = &self.commands {
+        if let Some(commands) = &mut self.commands {
             commands.render(area, buf);
         }
 

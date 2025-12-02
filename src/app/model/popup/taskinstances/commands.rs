@@ -2,7 +2,7 @@ use std::sync::LazyLock;
 
 use crate::app::model::popup::commands_help::{Command, CommandPopUp, DefaultCommands};
 
-pub static TASK_COMMAND_POP_UP: LazyLock<CommandPopUp> = LazyLock::new(|| {
+pub static TASK_COMMANDS: LazyLock<Vec<Command<'static>>> = LazyLock::new(|| {
     let mut commands = vec![
         Command {
             name: "Clear",
@@ -22,8 +22,9 @@ pub static TASK_COMMAND_POP_UP: LazyLock<CommandPopUp> = LazyLock::new(|| {
     ];
 
     commands.append(&mut DefaultCommands::new().0);
-    CommandPopUp {
-        title: "Task Commands".into(),
-        commands,
-    }
+    commands
 });
+
+pub fn create_task_command_popup() -> CommandPopUp<'static> {
+    CommandPopUp::new("Task Commands".into(), TASK_COMMANDS.clone())
+}

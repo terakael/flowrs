@@ -2,7 +2,7 @@ use std::sync::LazyLock;
 
 use crate::app::model::popup::commands_help::{Command, CommandPopUp, DefaultCommands};
 
-pub static DAG_COMMAND_POP_UP: LazyLock<CommandPopUp> = LazyLock::new(|| {
+pub static DAG_COMMANDS: LazyLock<Vec<Command<'static>>> = LazyLock::new(|| {
     let mut commands = vec![
         Command {
             name: "Toggle visibility",
@@ -26,8 +26,9 @@ pub static DAG_COMMAND_POP_UP: LazyLock<CommandPopUp> = LazyLock::new(|| {
         },
     ];
     commands.append(&mut DefaultCommands::new().0);
-    CommandPopUp {
-        title: "DAG Commands".into(),
-        commands,
-    }
+    commands
 });
+
+pub fn create_dag_command_popup() -> CommandPopUp<'static> {
+    CommandPopUp::new("DAG Commands".into(), DAG_COMMANDS.clone())
+}

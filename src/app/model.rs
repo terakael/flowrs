@@ -151,3 +151,59 @@ pub fn handle_vertical_scroll_keys(
         _ => false,
     }
 }
+
+/// Handle command popup events (filter, scrolling, close)
+/// Returns (Option<FlowrsEvent>, Vec<WorkerMessage>)
+pub fn handle_command_popup_events(
+    commands: &mut Option<popup::commands_help::CommandPopUp<'static>>,
+    key_event: &KeyEvent,
+) -> (Option<FlowrsEvent>, Vec<WorkerMessage>) {
+    if let Some(cmd) = commands {
+        // Handle Escape key with multi-stage behavior
+        if key_event.code == KeyCode::Esc {
+            if cmd.filter.is_enabled() {
+                // Filter dialogue is open: close it and clear any filter
+                cmd.filter.reset();
+                cmd.filter_commands();
+                return (None, vec![]);
+            } else if cmd.filter.prefix.is_some() {
+                // Filter dialogue closed but filter is applied: clear the filter
+                cmd.filter.prefix = None;
+                cmd.filter_commands();
+                return (None, vec![]);
+            } else {
+                // No filter active: close the help window
+                *commands = None;
+                return (None, vec![]);
+            }
+        }
+        
+        // Handle filter input
+        if cmd.filter.is_enabled() {
+            cmd.filter.update(key_event);
+            cmd.filter_commands();
+            return (None, vec![]);
+        }
+        
+        // Handle scrolling
+        if handle_table_scroll_keys(&mut cmd.filtered, key_event) {
+            return (None, vec![]);
+        }
+        
+        // Handle other keys
+        match key_event.code {
+            KeyCode::Char('/') => {
+                cmd.filter.toggle();
+            }
+            KeyCode::Char('q' | '?') => {
+                *commands = None;
+            }
+            KeyCode::Enter => {
+                *commands = None;
+            }
+            _ => (),
+        }
+        return (None, vec![]);
+    }
+    (None, vec![])
+}

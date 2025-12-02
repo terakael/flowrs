@@ -3,25 +3,25 @@ use std::vec;
 
 use super::popup::commands_help::CommandPopUp;
 use super::popup::error::ErrorPopup;
-use super::popup::taskinstances::commands::TASK_COMMAND_POP_UP;
+use super::popup::taskinstances::commands::create_task_command_popup;
 use crossterm::event::KeyCode;
 use log::debug;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Stylize};
+
 use ratatui::text::Line;
 use ratatui::widgets::{Block, BorderType, Borders, Row, StatefulWidget, Table, Widget};
 
 use crate::airflow::graph_layout::GraphPrefix;
 use crate::airflow::model::common::TaskInstance;
 use crate::app::events::custom::FlowrsEvent;
-use crate::ui::common::{create_headers, state_to_colored_square};
+use crate::ui::common::create_headers;
 use crate::ui::constants::{AirflowStateColor, ALTERNATING_ROW_COLOR, DEFAULT_STYLE, MARKED_COLOR};
 
 use super::popup::taskinstances::clear::ClearTaskInstancePopup;
 use super::popup::taskinstances::mark::MarkTaskInstancePopup;
 use super::popup::taskinstances::TaskInstancePopUp;
-use super::{filter::Filter, Model, StatefulTable, handle_table_scroll_keys};
+use super::{filter::Filter, handle_command_popup_events, Model, StatefulTable, handle_table_scroll_keys};
 use crate::app::worker::{OpenItem, WorkerMessage};
 
 pub struct TaskInstanceModel {
@@ -32,7 +32,7 @@ pub struct TaskInstanceModel {
     pub filter: Filter,
     pub popup: Option<TaskInstancePopUp>,
     pub marked: Vec<usize>,
-    commands: Option<&'static CommandPopUp<'static>>,
+    commands: Option<CommandPopUp<'static>>,
     pub error_popup: Option<ErrorPopup>,
     pub graph_layout: HashMap<String, GraphPrefix>,
     ticks: u32,
@@ -114,13 +114,8 @@ impl Model for TaskInstanceModel {
                         _ => (),
                     }
                     return (None, vec![]);
-                } else if let Some(_commands) = &mut self.commands {
-                    match key_event.code {
-                        KeyCode::Char('q' | '?') | KeyCode::Esc => {
-                            self.commands = None;
-                        }
-                        _ => (),
-                    }
+                } else if self.commands.is_some() {
+                    return handle_command_popup_events(&mut self.commands, key_event);
                 } else if let Some(popup) = &mut self.popup {
                     match popup {
                         TaskInstancePopUp::Clear(popup) => {
@@ -210,7 +205,7 @@ impl Model for TaskInstanceModel {
                             }
                         }
                         KeyCode::Char('?') => {
-                            self.commands = Some(&*TASK_COMMAND_POP_UP);
+                            self.commands = Some(create_task_command_popup());
                         }
                         KeyCode::Char('/') => {
                             self.filter.toggle();
@@ -379,7 +374,7 @@ impl Widget for &mut TaskInstanceModel {
             _ => (),
         }
 
-        if let Some(commands) = &self.commands {
+        if let Some(commands) = &mut self.commands {
             commands.render(area, buffer);
         }
 

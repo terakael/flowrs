@@ -21,13 +21,13 @@ use crate::ui::constants::{AirflowStateColor, ALTERNATING_ROW_COLOR, DEFAULT_STY
 use crate::ui::TIME_FORMAT;
 
 use super::popup::commands_help::CommandPopUp;
-use super::popup::dagruns::commands::DAGRUN_COMMAND_POP_UP;
+use super::popup::dagruns::commands::create_dagrun_command_popup;
 use super::popup::dagruns::trigger::TriggerDagRunPopUp;
 use super::popup::dagruns::DagRunPopUp;
 use super::popup::error::ErrorPopup;
 use super::popup::popup_area;
 use super::popup::{dagruns::clear::ClearDagRunPopup, dagruns::mark::MarkDagRunPopup};
-use super::{filter::Filter, Model, StatefulTable, handle_table_scroll_keys, handle_vertical_scroll_keys};
+use super::{filter::Filter, handle_command_popup_events, Model, StatefulTable, handle_table_scroll_keys, handle_vertical_scroll_keys};
 use crate::app::worker::{OpenItem, WorkerMessage};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -102,7 +102,7 @@ pub struct DagRunModel {
     pub filter: Filter,
     pub marked: Vec<usize>,
     pub popup: Option<DagRunPopUp>,
-    pub commands: Option<&'static CommandPopUp<'static>>,
+    pub commands: Option<CommandPopUp<'static>>,
     pub error_popup: Option<ErrorPopup>,
     pub current_page: usize,
     pub page_size: usize,
@@ -262,14 +262,8 @@ impl Model for DagRunModel {
                         _ => (),
                     }
                     return (None, vec![]);
-                } else if let Some(_commands) = &mut self.commands {
-                    match key_event.code {
-                        KeyCode::Char('q' | '?') | KeyCode::Esc => {
-                            self.commands = None;
-                            return (None, vec![]);
-                        }
-                        _ => (),
-                    }
+                } else if self.commands.is_some() {
+                    return handle_command_popup_events(&mut self.commands, key_event);
                 } else if let Some(popup) = &mut self.popup {
                     // TODO: refactor this, should be all the same
                     match popup {
@@ -477,7 +471,7 @@ impl Model for DagRunModel {
                             }
                         }
                         KeyCode::Char('?') => {
-                            self.commands = Some(&*DAGRUN_COMMAND_POP_UP);
+                            self.commands = Some(create_dagrun_command_popup());
                         }
                         KeyCode::Char('/') => {
                             self.filter.toggle();
@@ -725,7 +719,7 @@ impl Widget for &mut DagRunModel {
             _ => (),
         }
 
-        if let Some(commands) = &self.commands {
+        if let Some(commands) = &mut self.commands {
             commands.render(area, buf);
         }
 
