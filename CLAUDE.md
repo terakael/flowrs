@@ -122,6 +122,7 @@ Conveyor integration (src/airflow/managed_services/conveyor.rs):
 
 - `q`: Quit application
 - `Ctrl+C` or `Ctrl+D`: Exit
-- `Enter` / `Right` / `l`: Move to next panel
-- `Esc` / `Left` / `h`: Move to previous panel
+- `Enter` / `Right`: Move to next panel
+- `Esc` / `Left`: Move to previous panel
+- `h` / `l`: Previous/next tab (in panels with tabs) or cycle through attempts (logs panel)
 - Panel-specific keys defined in popup command modules

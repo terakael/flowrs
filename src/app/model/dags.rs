@@ -182,9 +182,9 @@ pub struct DagModel {
 
 impl DagModel {
     pub fn new() -> Self {
-        // Reserved keys across all DAG panel tabs: j/k (scroll), g/G (jump), H/L (tab nav), 
+        // Reserved keys across all DAG panel tabs: j/k (scroll), g/G (jump), h/l (tab nav), 
         // p (pause toggle), o (open), r (refresh), ? (help), / (filter)
-        let reserved = &['j', 'k', 'g', 'G', 'H', 'L', 'p', 'o', 'r', '?', '/'];
+        let reserved = &['j', 'k', 'g', 'G', 'h', 'l', 'p', 'o', 'r', '?', '/'];
         
         DagModel {
             // Tab state - start on DAGs tab
@@ -688,8 +688,8 @@ impl Model for DagModel {
                     }
                     
                     match key_event.code {
-                        KeyCode::Char('H') => {
-                            // Shift+H - Previous tab
+                        KeyCode::Char('h') => {
+                            // h - Previous tab
                             self.active_tab = match self.active_tab {
                                 DagPanelTab::Dags => DagPanelTab::Dags, // Stay on first tab
                                 DagPanelTab::Variables => DagPanelTab::Dags,
@@ -709,8 +709,8 @@ impl Model for DagModel {
                             };
                             return (None, messages);
                         }
-                        KeyCode::Char('L') => {
-                            // Shift+L - Next tab
+                        KeyCode::Char('l') => {
+                            // l - Next tab
                             self.active_tab = match self.active_tab {
                                 DagPanelTab::Dags => DagPanelTab::Variables,
                                 DagPanelTab::Variables => DagPanelTab::Connections,

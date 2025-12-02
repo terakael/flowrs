@@ -199,11 +199,11 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: Arc<Mutex<App>
                         app.config.write_to_file()?;
                         return Ok(());
                     }
-                    KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+                    KeyCode::Enter | KeyCode::Right => {
                         app.next_panel();
                         app.sync_panel_data();
                     }
-                    KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => {
+                    KeyCode::Esc | KeyCode::Left => {
                         app.previous_panel();
                         app.sync_panel_data();
                     }
