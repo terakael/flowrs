@@ -98,20 +98,7 @@ impl Model for TaskInstanceModel {
         match event {
             FlowrsEvent::Tick => {
                 self.ticks += 1;
-                if !self.ticks.is_multiple_of(10) {
-                    return (Some(FlowrsEvent::Tick), vec![]);
-                }
-                if let (Some(dag_run_id), Some(dag_id)) = (&self.dag_run_id, &self.dag_id) {
-                    log::debug!("Updating task instances for dag_run_id: {dag_run_id}");
-                    return (
-                        Some(FlowrsEvent::Tick),
-                        vec![WorkerMessage::UpdateTaskInstances {
-                            dag_id: dag_id.clone(),
-                            dag_run_id: dag_run_id.clone(),
-                            clear: false,
-                        }],
-                    );
-                }
+                // No automatic refresh - use 'r' key to refresh manually
                 (Some(FlowrsEvent::Tick), vec![])
             }
             FlowrsEvent::Key(key_event) => {
@@ -257,6 +244,24 @@ impl Model for TaskInstanceModel {
                                         dag_run_id: task_instance.dag_run_id.clone(),
                                         task_id: task_instance.task_id.clone(),
                                     })],
+                                );
+                            }
+                        }
+                        KeyCode::Char('r') => {
+                            // Manual refresh - reload task instances and task order
+                            if let (Some(dag_id), Some(dag_run_id)) = (&self.dag_id, &self.dag_run_id) {
+                                return (
+                                    None,
+                                    vec![
+                                        WorkerMessage::UpdateTaskInstances {
+                                            dag_id: dag_id.clone(),
+                                            dag_run_id: dag_run_id.clone(),
+                                            clear: true,
+                                        },
+                                        WorkerMessage::FetchTaskOrder {
+                                            dag_id: dag_id.clone(),
+                                        },
+                                    ],
                                 );
                             }
                         }

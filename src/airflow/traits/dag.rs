@@ -17,7 +17,8 @@ pub trait DagOperations: Send + Sync {
     /// # Arguments
     /// * `offset` - Number of DAGs to skip
     /// * `limit` - Maximum number of DAGs to return
-    /// * `only_active` - If true, only return active (non-paused) DAGs
+    /// * `only_active` - If true, only return DAGs with is_active=true (valid/schedulable DAGs)
+    ///   Note: This filters by is_active, not is_paused. Paused DAGs are filtered in the UI.
     async fn list_dags_paginated(&self, offset: i64, limit: i64, only_active: bool) -> Result<DagList>;
 
     /// Toggle a DAG's paused state

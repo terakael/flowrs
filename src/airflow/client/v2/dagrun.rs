@@ -40,6 +40,12 @@ impl DagRunOperations for V2Client {
         Ok(dagruns.into())
     }
 
+    async fn list_dagruns_batch(&self, dag_ids: Vec<String>, limit_per_dag: i64) -> Result<DagRunList> {
+        let response = self.base.request_batch_dagruns("api/v2", dag_ids, limit_per_dag).await?;
+        let dagruns: model::dagrun::DagRunList = response.json::<model::dagrun::DagRunList>().await?;
+        Ok(dagruns.into())
+    }
+
     async fn mark_dag_run(&self, dag_id: &str, dag_run_id: &str, status: &str) -> Result<()> {
         self
             .base_api(

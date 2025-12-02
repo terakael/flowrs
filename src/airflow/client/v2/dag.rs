@@ -19,7 +19,7 @@ impl DagOperations for V2Client {
                 ("limit", limit.to_string()),
                 ("offset", offset.to_string()),
                 ("order_by", "dag_id".to_string()),
-                ("only_active", "false".to_string())
+                ("only_active", "true".to_string())  // Always fetch only is_active=true DAGs
             ])
             .send()
             .await?

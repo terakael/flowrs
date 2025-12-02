@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use log::{debug, info};
 use reqwest::{Method, Url};
+use serde_json;
 use std::convert::TryFrom;
 use std::time::Duration;
 
@@ -128,6 +129,32 @@ impl BaseClient {
                     .bearer_auth(&auth.api_token))
             }
         }
+    }
+
+    /// Helper method to build a batch DAG runs request
+    /// This is shared between V1 and V2 clients to avoid duplication
+    pub async fn request_batch_dagruns(
+        &self,
+        api_version: &str,
+        dag_ids: Vec<String>,
+        limit_per_dag: i64,
+    ) -> Result<reqwest::Response> {
+        // Calculate total limit but cap at 100 to respect API limits
+        let desired_limit = limit_per_dag * dag_ids.len() as i64;
+        let page_limit = std::cmp::min(desired_limit, 100);
+        
+        let response = self
+            .base_api(Method::POST, "dags/~/dagRuns/list", api_version)?
+            .json(&serde_json::json!({
+                "dag_ids": dag_ids,
+                "page_limit": page_limit,
+                "order_by": "-execution_date"
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
+        
+        Ok(response)
     }
 }
 

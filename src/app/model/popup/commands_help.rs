@@ -61,6 +61,11 @@ impl DefaultCommands {
                 description: "Open the selected item",
             },
             Command {
+                name: "Refresh",
+                key_binding: "r",
+                description: "Refresh current panel data",
+            },
+            Command {
                 name: "Filter",
                 key_binding: "/",
                 description: "Filter items",

@@ -223,14 +223,15 @@ impl DagModel {
             return Color::Red;  // Latest run failed
         }
 
-        if latest_run.state == "success" {
+        // Treat "running", "queued", "scheduled", and "success" as success states
+        if matches!(latest_run.state.as_str(), "success" | "running" | "queued" | "scheduled") {
             if Self::has_recent_failures(&runs[1..]) {
                 crate::ui::constants::YELLOW  // Warning - recovered from failure
             } else {
                 crate::ui::constants::GREEN  // All good
             }
         } else {
-            Color::Reset  // Latest still running or other state
+            Color::Reset  // Unknown state
         }
     }
 
@@ -347,72 +348,13 @@ impl Model for DagModel {
                         // Waiting for initial load to complete
                         return (Some(FlowrsEvent::Tick), vec![]);
                     }
-                    LoadingStatus::LoadingMore { current, total } => {
-                        // Progressive loading with exponential batch sizes
-                        // Exponential: 10 -> 20 -> 40 -> 80 -> 160...
-                        let next_batch_size = if *current < 10 {
-                            20  // After initial 10, fetch 20
-                        } else if *current < 30 {
-                            40  // After 30, fetch 40
-                        } else if *current < 70 {
-                            80  // After 70, fetch 80
-                        } else {
-                            100 // After 150+, fetch 100 at a time
-                        };
-                        
-                        // Fetch more frequently during initial loading (every tick)
-                        // Then slow down to every 2-3 ticks for larger batches
-                        let tick_interval = if *current < 50 { 1 } else { 2 };
-                        
-                        if self.ticks.is_multiple_of(tick_interval) && current < total {
-                            return (
-                                Some(FlowrsEvent::Tick),
-                                vec![
-                                    WorkerMessage::FetchMoreDags {
-                                        only_active: !self.show_paused,
-                                        offset: *current as i64,
-                                        limit: next_batch_size,
-                                    }
-                                ],
-                            );
-                        }
-                        
-                        // Once we have 50+ DAGs, start fetching stats
-                        if *current >= 50 && self.ticks.is_multiple_of(10) {
-                            return (
-                                Some(FlowrsEvent::Tick),
-                                vec![
-                                    WorkerMessage::UpdateDagStats { clear: false },
-                                    WorkerMessage::UpdateImportErrors,
-                                    WorkerMessage::UpdateRecentDagRuns,
-                                ],
-                            );
-                        }
+                    LoadingStatus::LoadingMore { current: _, total: _ } => {
+                        // Progressive loading is now handled by the worker via callbacks
+                        // The worker automatically triggers the next batch when the previous completes
+                        // No need to check ticks or trigger from here
                     }
                     LoadingStatus::Complete => {
-                        // All DAGs loaded - periodic refresh of stats only
-                        if self.ticks.is_multiple_of(10) {
-                            return (
-                                Some(FlowrsEvent::Tick),
-                                vec![
-                                    WorkerMessage::UpdateDagStats { clear: false },
-                                    WorkerMessage::UpdateImportErrors,
-                                    WorkerMessage::UpdateRecentDagRuns,
-                                ],
-                            );
-                        }
-                        
-                        // Full refresh every 100 ticks (~100 seconds)
-                        if self.ticks.is_multiple_of(100) {
-                            return (
-                                Some(FlowrsEvent::Tick),
-                                vec![
-                                    WorkerMessage::UpdateDags {
-                                        only_active: !self.show_paused,
-                                    },
-                                ],
-                            );
-                        }
+                        // All DAGs loaded - no automatic refresh, use 'r' key to refresh manually
                     }
                 }
                 
@@ -609,6 +551,18 @@ impl Model for DagModel {
                             self.error_popup = Some(ErrorPopup::from_strings(vec![
                                 "No DAG selected to open in the browser".to_string(),
                             ]));
+                        }
+                        KeyCode::Char('r') => {
+                            // Manual refresh - trigger fresh data load
+                            self.loading_status = LoadingStatus::NotStarted;
+                            return (
+                                None,
+                                vec![
+                                    WorkerMessage::UpdateDags {
+                                        only_active: !self.show_paused,
+                                    },
+                                ],
+                            );
                         }
                         _ => return (Some(FlowrsEvent::Key(*key_event)), vec![]), // if no match, return the event
                     }

@@ -16,6 +16,10 @@ pub trait DagRunOperations: Send + Sync {
     #[allow(unused)]
     async fn list_all_dagruns(&self) -> Result<DagRunList>;
 
+    /// List recent DAG runs for multiple DAGs (batch operation)
+    /// This uses the POST /dags/~/dagRuns/list endpoint which accepts multiple dag_ids
+    async fn list_dagruns_batch(&self, dag_ids: Vec<String>, limit_per_dag: i64) -> Result<DagRunList>;
+
     /// Mark a DAG run with a specific status
     async fn mark_dag_run(&self, dag_id: &str, dag_run_id: &str, status: &str) -> Result<()>;
 

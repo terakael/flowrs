@@ -64,24 +64,7 @@ impl Model for LogModel {
         match event {
             FlowrsEvent::Tick => {
                 self.ticks += 1;
-                if !self.ticks.is_multiple_of(10) {
-                    return (Some(FlowrsEvent::Tick), vec![]);
-                }
-                if let (Some(dag_run_id), Some(dag_id), Some(task_id), Some(tries)) =
-                    (&self.dag_run_id, &self.dag_id, &self.task_id, &self.tries)
-                {
-                    log::debug!("Updating task instances for dag_run_id: {dag_run_id}");
-                    return (
-                        Some(FlowrsEvent::Tick),
-                        vec![WorkerMessage::UpdateTaskLogs {
-                            dag_id: dag_id.clone(),
-                            dag_run_id: dag_run_id.clone(),
-                            task_id: task_id.clone(),
-                            task_try: *tries,
-                            clear: false,
-                        }],
-                    );
-                }
+                // No automatic refresh - use 'r' key to refresh manually
                 return (Some(FlowrsEvent::Tick), vec![]);
             }
             FlowrsEvent::Key(key) => {
@@ -137,6 +120,23 @@ impl Model for LogModel {
                                     #[allow(clippy::cast_possible_truncation)]
                                     task_try: (self.current + 1) as u16,
                                 })],
+                            );
+                        }
+                    }
+                    KeyCode::Char('r') => {
+                        // Manual refresh - reload task logs
+                        if let (Some(dag_id), Some(dag_run_id), Some(task_id), Some(tries)) = 
+                            (&self.dag_id, &self.dag_run_id, &self.task_id, &self.tries) 
+                        {
+                            return (
+                                None,
+                                vec![WorkerMessage::UpdateTaskLogs {
+                                    dag_id: dag_id.clone(),
+                                    dag_run_id: dag_run_id.clone(),
+                                    task_id: task_id.clone(),
+                                    task_try: *tries,
+                                    clear: true,
+                                }],
                             );
                         }
                     }

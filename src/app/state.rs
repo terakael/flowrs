@@ -3,6 +3,7 @@ use crate::app::environment_state::EnvironmentStateContainer;
 use crate::app::model::dagruns::DagRunModel;
 use crate::app::model::dags::DagModel;
 use throbber_widgets_tui::ThrobberState;
+use log::debug;
 
 use super::model::{config::ConfigModel, logs::LogModel, taskinstances::TaskInstanceModel};
 
@@ -88,6 +89,7 @@ impl App {
         // Clear view models but not environment_state
         // This clears UI state (filters, selections) but data persists in environment_state
         self.dags.all.clear();
+        self.dags.loading_status = crate::app::model::dags::LoadingStatus::NotStarted;
         self.dagruns.all.clear();
         self.task_instances.all.clear();
         self.logs.all.clear();
@@ -98,8 +100,10 @@ impl App {
     pub fn sync_panel_data(&mut self) {
         match self.active_panel {
             Panel::Dag => {
+                let dag_count = self.environment_state.get_active_dags().len();
                 self.dags.all = self.environment_state.get_active_dags();
                 self.dags.filter_dags();
+                debug!("sync_panel_data: Synced {} DAGs to panel, recent_runs has {} entries", dag_count, self.dags.recent_runs.len());
             }
             Panel::DAGRun => {
                 if let Some(dag_id) = &self.dagruns.dag_id.clone() {

@@ -9,11 +9,12 @@ use super::{model::popup::dagruns::mark::MarkState, state::App};
 use anyhow::Result;
 use futures::future::join_all;
 use log::debug;
-use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::{Receiver, Sender};
 
 pub struct Worker {
     app: Arc<Mutex<App>>,
     rx: Receiver<WorkerMessage>,
+    tx: Sender<WorkerMessage>,
 }
 
 #[derive(Debug)]
@@ -117,8 +118,8 @@ pub enum OpenItem {
 }
 
 impl Worker {
-    pub fn new(app: Arc<Mutex<App>>, rx_worker: Receiver<WorkerMessage>) -> Self {
-        Worker { app, rx: rx_worker }
+    pub fn new(app: Arc<Mutex<App>>, rx_worker: Receiver<WorkerMessage>, tx_worker: Sender<WorkerMessage>) -> Self {
+        Worker { app, rx: rx_worker, tx: tx_worker }
     }
 
     pub async fn process_message(&mut self, message: WorkerMessage) -> Result<()> {
@@ -155,8 +156,10 @@ impl Worker {
         match message {
             WorkerMessage::UpdateDags { only_active } => {
                 // Fetch initial 10 DAGs for immediate display
+                let start = std::time::Instant::now();
+                debug!("[PERF] Starting UpdateDags - fetching first 10 DAGs");
                 let dag_list = client.list_dags_paginated(0, 10, only_active).await;
-                let mut app = self.app.lock().unwrap();
+                debug!("[PERF] UpdateDags: list_dags_paginated took {:?}", start.elapsed());
                 match dag_list {
                     Ok(dag_list) => {
                         let total = dag_list.total_entries;
@@ -165,64 +168,305 @@ impl Worker {
                         let paused_count = dag_list.dags.iter().filter(|d| d.is_paused).count();
                         debug!("  Active: {}, Paused: {}", active_count, paused_count);
                         
-                        // Store initial DAGs in the environment state
-                        if let Some(env) = app.environment_state.get_active_environment_mut() {
-                            for dag in &dag_list.dags {
-                                env.upsert_dag(dag.clone());
+                        // Extract unpaused DAG IDs from this batch for stats fetching
+                        let unpaused_dag_ids: Vec<String> = dag_list.dags
+                            .iter()
+                            .filter(|dag| !dag.is_paused)
+                            .map(|dag| dag.dag_id.clone())
+                            .collect();
+                        
+                        // Store initial DAGs in the environment state and check if we need more
+                        let (needs_more, current_count) = {
+                            let mut app = self.app.lock().unwrap();
+                            if let Some(env) = app.environment_state.get_active_environment_mut() {
+                                for dag in &dag_list.dags {
+                                    env.upsert_dag(dag.clone());
+                                }
                             }
+                            
+                            // Set loading status
+                            let needs_more = dag_list.dags.len() < total as usize;
+                            app.dags.loading_status = if needs_more {
+                                crate::app::model::dags::LoadingStatus::LoadingMore {
+                                    current: dag_list.dags.len(),
+                                    total: total as usize,
+                                }
+                            } else {
+                                crate::app::model::dags::LoadingStatus::Complete
+                            };
+                            
+                            // Sync panel data from environment state
+                            app.sync_panel_data();
+                            
+                            (needs_more, dag_list.dags.len())
+                        }; // Lock is dropped here
+                        
+                        // If we need more DAGs, automatically trigger the next fetch
+                        if needs_more {
+                            debug!("Auto-triggering next batch after initial load: offset={}, total={}", current_count, total);
+                            let _ = self.tx.send(WorkerMessage::FetchMoreDags {
+                                only_active,
+                                offset: current_count as i64,
+                                limit: 10, // Same batch size as initial load
+                            }).await;
                         }
                         
-                        // Set loading status
-                        app.dags.loading_status = if dag_list.dags.len() >= total as usize {
-                            crate::app::model::dags::LoadingStatus::Complete
-                        } else {
-                            crate::app::model::dags::LoadingStatus::LoadingMore {
-                                current: dag_list.dags.len(),
-                                total: total as usize,
-                            }
-                        };
+                        // Spawn stats and recent runs fetching in background - don't block next DAG batch
+                        if !unpaused_dag_ids.is_empty() {
+                            let app_clone = self.app.clone();
+                            let client_clone = client.clone();
+                            tokio::spawn(async move {
+                                // Fetch DAG stats (single API call for batch)
+                                let dag_ids_str: Vec<&str> = unpaused_dag_ids.iter().map(|s| s.as_str()).collect();
+                                if let Ok(dag_stats) = client_clone.get_dag_stats(dag_ids_str).await {
+                                    let mut app = app_clone.lock().unwrap();
+                                    for dag_stats in dag_stats.dags {
+                                        app.dags.dag_stats.insert(dag_stats.dag_id, dag_stats.stats);
+                                    }
+                                }
+                                
+                                // Fetch recent runs using batch API with intelligent follow-up for missing DAGs
+                                let mut all_runs: std::collections::HashMap<String, Vec<_>> = std::collections::HashMap::new();
+                                let mut remaining_dag_ids = unpaused_dag_ids.clone();
+                                
+                                // Keep calling batch API until all DAGs have been retrieved
+                                while !remaining_dag_ids.is_empty() {
+                                    match client_clone.list_dagruns_batch(
+                                        remaining_dag_ids.clone(),
+                                        crate::app::model::dags::RECENT_RUNS_HEALTH_WINDOW as i64
+                                    ).await {
+                                        Ok(dag_runs) => {
+                                            let run_count = dag_runs.dag_runs.len();
+                                            debug!("[UpdateDags] Batch API returned {} runs for {} DAGs", run_count, remaining_dag_ids.len());
+                                            
+                                            // Group runs by DAG ID
+                                            let mut runs_in_batch: std::collections::HashSet<String> = std::collections::HashSet::new();
+                                            for run in dag_runs.dag_runs {
+                                                runs_in_batch.insert(run.dag_id.clone());
+                                                all_runs.entry(run.dag_id.clone()).or_default().push(run);
+                                            }
+                                            
+                                            debug!("[UpdateDags] Got results for {} unique DAGs out of {} requested", runs_in_batch.len(), remaining_dag_ids.len());
+                                            
+                                            // Remove DAGs we got results for
+                                            let before_count = remaining_dag_ids.len();
+                                            remaining_dag_ids.retain(|id| !runs_in_batch.contains(id));
+                                            let after_count = remaining_dag_ids.len();
+                                            
+                                            // If no DAGs were removed, that means remaining DAGs have no runs
+                                            // Mark them as checked and stop to avoid infinite loop
+                                            if before_count == after_count {
+                                                debug!("[UpdateDags] No new DAGs returned runs - remaining {} DAGs likely have no runs", after_count);
+                                                for dag_id in &remaining_dag_ids {
+                                                    all_runs.insert(dag_id.clone(), vec![]);
+                                                }
+                                                break;
+                                            }
+                                            
+                                            if after_count > 0 {
+                                                debug!("[UpdateDags] {} DAGs still need results. Retrying (removed {})", after_count, before_count - after_count);
+                                            } else {
+                                                debug!("[UpdateDags] All DAGs retrieved successfully");
+                                                break;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            debug!("[UpdateDags] Batch API error: {}", e);
+                                            break;
+                                        }
+                                    }
+                                }
+                                
+                                // Store results
+                                let mut app = app_clone.lock().unwrap();
+                                let mut stored_with_runs = 0;
+                                let mut stored_without_runs = 0;
+                                for dag_id in &unpaused_dag_ids {
+                                    if let Some(mut runs) = all_runs.remove(dag_id) {
+                                        runs.sort_by(|a, b| b.logical_date.cmp(&a.logical_date));
+                                        runs.truncate(crate::app::model::dags::RECENT_RUNS_HEALTH_WINDOW);
+                                        app.dags.recent_runs.insert(dag_id.clone(), runs);
+                                        stored_with_runs += 1;
+                                    } else {
+                                        app.dags.recent_runs.insert(dag_id.clone(), vec![]);
+                                        stored_without_runs += 1;
+                                    }
+                                }
+                                debug!("[UpdateDags] Stored {} DAGs with runs, {} without runs, recent_runs now has {} total entries", 
+                                    stored_with_runs, stored_without_runs, app.dags.recent_runs.len());
+                                
+                                // Trigger UI refresh now that runs are available
+                                app.sync_panel_data();
+                                debug!("[UpdateDags] Synced panel data after storing runs");
+                            });
+                        }
                         
-                        // Sync panel data from environment state
-                        app.sync_panel_data();
+                        // Also fetch import errors on initial load (spawn in background too)
+                        let app_clone = self.app.clone();
+                        let client_clone = client.clone();
+                        tokio::spawn(async move {
+                            if let Ok(error_list) = client_clone.list_import_errors().await {
+                                let mut app = app_clone.lock().unwrap();
+                                app.dags.import_error_count = error_list.total_entries as usize;
+                                app.dags.import_error_list = error_list.import_errors.clone();
+                                app.dags.import_errors.set_errors(&error_list.import_errors);
+                            }
+                        });
                     }
                     Err(e) => {
+                        let mut app = self.app.lock().unwrap();
                         app.dags.error_popup = Some(ErrorPopup::from_strings(vec![e.to_string()]));
                         app.dags.loading_status = crate::app::model::dags::LoadingStatus::Complete;
                     }
                 }
             }
             WorkerMessage::FetchMoreDags { only_active, offset, limit } => {
+                let start = std::time::Instant::now();
+                debug!("[PERF] FetchMoreDags: offset={}, limit={}", offset, limit);
                 let dag_list = client.list_dags_paginated(offset, limit, only_active).await;
-                let mut app = self.app.lock().unwrap();
+                debug!("[PERF] FetchMoreDags: list_dags_paginated took {:?}", start.elapsed());
                 match dag_list {
                     Ok(dag_list) => {
                         let total = dag_list.total_entries;
                         debug!("Fetched {} more DAGs at offset {}, total: {}", dag_list.dags.len(), offset, total);
                         
-                        // Append to existing DAGs in environment state
-                        if let Some(env) = app.environment_state.get_active_environment_mut() {
-                            for dag in &dag_list.dags {
-                                env.upsert_dag(dag.clone());
+                        // Extract unpaused DAG IDs from this batch for stats fetching
+                        let unpaused_dag_ids: Vec<String> = dag_list.dags
+                            .iter()
+                            .filter(|dag| !dag.is_paused)
+                            .map(|dag| dag.dag_id.clone())
+                            .collect();
+                        
+                        // Append to existing DAGs in environment state and check if we need more
+                        let (needs_more, current_count) = {
+                            let mut app = self.app.lock().unwrap();
+                            if let Some(env) = app.environment_state.get_active_environment_mut() {
+                                for dag in &dag_list.dags {
+                                    env.upsert_dag(dag.clone());
+                                }
                             }
+                            
+                            // Calculate new current count
+                            let current_count = app.environment_state
+                                .get_active_dags()
+                                .len();
+                            
+                            // Update loading status
+                            let needs_more = current_count < total as usize;
+                            app.dags.loading_status = if needs_more {
+                                crate::app::model::dags::LoadingStatus::LoadingMore {
+                                    current: current_count,
+                                    total: total as usize,
+                                }
+                            } else {
+                                crate::app::model::dags::LoadingStatus::Complete
+                            };
+                            
+                            // Sync panel data from environment state
+                            app.sync_panel_data();
+                            
+                            (needs_more, current_count)
+                        }; // Lock is dropped here
+                        
+                        // If we need more DAGs, automatically trigger the next fetch
+                        // This is done after dropping the lock to avoid holding it across await
+                        if needs_more {
+                            debug!("Auto-triggering next batch: offset={}, total={}", current_count, total);
+                            let _ = self.tx.send(WorkerMessage::FetchMoreDags {
+                                only_active,
+                                offset: current_count as i64,
+                                limit,
+                            }).await;
                         }
                         
-                        // Calculate new current count
-                        let current_count = app.environment_state
-                            .get_active_dags()
-                            .len();
-                        
-                        // Update loading status
-                        app.dags.loading_status = if current_count >= total as usize {
-                            crate::app::model::dags::LoadingStatus::Complete
-                        } else {
-                            crate::app::model::dags::LoadingStatus::LoadingMore {
-                                current: current_count,
-                                total: total as usize,
-                            }
-                        };
-                        
-                        // Sync panel data from environment state
-                        app.sync_panel_data();
+                        // Spawn stats and recent runs fetching in background - don't block next DAG batch
+                        if !unpaused_dag_ids.is_empty() {
+                            let app_clone = self.app.clone();
+                            let client_clone = client.clone();
+                            tokio::spawn(async move {
+                                // Fetch DAG stats (single API call for batch)
+                                let dag_ids_str: Vec<&str> = unpaused_dag_ids.iter().map(|s| s.as_str()).collect();
+                                if let Ok(dag_stats) = client_clone.get_dag_stats(dag_ids_str).await {
+                                    let mut app = app_clone.lock().unwrap();
+                                    for dag_stats in dag_stats.dags {
+                                        app.dags.dag_stats.insert(dag_stats.dag_id, dag_stats.stats);
+                                    }
+                                }
+                                
+                                // Fetch recent runs using batch API with intelligent follow-up for missing DAGs
+                                let mut all_runs: std::collections::HashMap<String, Vec<_>> = std::collections::HashMap::new();
+                                let mut remaining_dag_ids = unpaused_dag_ids.clone();
+                                
+                                // Keep calling batch API until all DAGs have been retrieved
+                                while !remaining_dag_ids.is_empty() {
+                                    match client_clone.list_dagruns_batch(
+                                        remaining_dag_ids.clone(),
+                                        crate::app::model::dags::RECENT_RUNS_HEALTH_WINDOW as i64
+                                    ).await {
+                                        Ok(dag_runs) => {
+                                            let run_count = dag_runs.dag_runs.len();
+                                            debug!("[FetchMoreDags] Batch API returned {} runs for {} DAGs", run_count, remaining_dag_ids.len());
+                                            
+                                            // Group runs by DAG ID
+                                            let mut runs_in_batch: std::collections::HashSet<String> = std::collections::HashSet::new();
+                                            for run in dag_runs.dag_runs {
+                                                runs_in_batch.insert(run.dag_id.clone());
+                                                all_runs.entry(run.dag_id.clone()).or_default().push(run);
+                                            }
+                                            
+                                            debug!("[FetchMoreDags] Got results for {} unique DAGs out of {} requested", runs_in_batch.len(), remaining_dag_ids.len());
+                                            
+                                            // Remove DAGs we got results for
+                                            let before_count = remaining_dag_ids.len();
+                                            remaining_dag_ids.retain(|id| !runs_in_batch.contains(id));
+                                            let after_count = remaining_dag_ids.len();
+                                            
+                                            // If no DAGs were removed, that means remaining DAGs have no runs
+                                            // Mark them as checked and stop to avoid infinite loop
+                                            if before_count == after_count {
+                                                debug!("[FetchMoreDags] No new DAGs returned runs - remaining {} DAGs likely have no runs", after_count);
+                                                for dag_id in &remaining_dag_ids {
+                                                    all_runs.insert(dag_id.clone(), vec![]);
+                                                }
+                                                break;
+                                            }
+                                            
+                                            if after_count > 0 {
+                                                debug!("[FetchMoreDags] {} DAGs still need results. Retrying (removed {})", after_count, before_count - after_count);
+                                            } else {
+                                                debug!("[FetchMoreDags] All DAGs retrieved successfully");
+                                                break;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            debug!("[FetchMoreDags] Batch API error: {}", e);
+                                            break;
+                                        }
+                                    }
+                                }
+                                
+                                // Store results
+                                let mut app = app_clone.lock().unwrap();
+                                let mut stored_with_runs = 0;
+                                let mut stored_without_runs = 0;
+                                for dag_id in &unpaused_dag_ids {
+                                    if let Some(mut runs) = all_runs.remove(dag_id) {
+                                        runs.sort_by(|a, b| b.logical_date.cmp(&a.logical_date));
+                                        runs.truncate(crate::app::model::dags::RECENT_RUNS_HEALTH_WINDOW);
+                                        app.dags.recent_runs.insert(dag_id.clone(), runs);
+                                        stored_with_runs += 1;
+                                    } else {
+                                        app.dags.recent_runs.insert(dag_id.clone(), vec![]);
+                                        stored_without_runs += 1;
+                                    }
+                                }
+                                debug!("[FetchMoreDags] Stored {} DAGs with runs, {} without runs", stored_with_runs, stored_without_runs);
+                                
+                                // Trigger UI refresh now that runs are available
+                                app.sync_panel_data();
+                                debug!("[FetchMoreDags] Synced panel data after storing runs");
+                            });
+                        }
                     }
                     Err(e) => {
                         // Retry logic: keep current loading status, error will be logged

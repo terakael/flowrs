@@ -246,18 +246,8 @@ impl Model for DagRunModel {
         match event {
             FlowrsEvent::Tick => {
                 self.ticks += 1;
-                if !self.ticks.is_multiple_of(10) {
-                    return (Some(FlowrsEvent::Tick), vec![]);
-                }
-                let worker_messages = if let Some(dag_id) = &self.dag_id {
-                    vec![WorkerMessage::UpdateDagRuns {
-                        dag_id: dag_id.clone(),
-                        clear: false,
-                    }]
-                } else {
-                    Vec::default()
-                };
-                return (Some(FlowrsEvent::Tick), worker_messages);
+                // No automatic refresh - use 'r' key to refresh manually
+                return (Some(FlowrsEvent::Tick), vec![]);
             }
             FlowrsEvent::Key(key_event) => {
                 if self.filter.is_enabled() {
@@ -544,6 +534,23 @@ impl Model for DagRunModel {
                                         dag_id: dag_id.clone(),
                                         dag_run_id: dag_run.dag_run_id.clone(),
                                     })],
+                                );
+                            }
+                        }
+                        KeyCode::Char('r') => {
+                            // Manual refresh - reload dag runs and details
+                            if let Some(dag_id) = &self.dag_id {
+                                return (
+                                    None,
+                                    vec![
+                                        WorkerMessage::UpdateDagRuns {
+                                            dag_id: dag_id.clone(),
+                                            clear: true,
+                                        },
+                                        WorkerMessage::GetDagDetails {
+                                            dag_id: dag_id.clone(),
+                                        },
+                                    ],
                                 );
                             }
                         }

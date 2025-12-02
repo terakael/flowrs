@@ -56,7 +56,8 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: Arc<Mutex<App>
     }
 
     log::info!("Spawning worker");
-    tokio::spawn(async move { Worker::new(worker_app, rx_worker).run().await });
+    let tx_worker_for_worker = tx_worker.clone();
+    tokio::spawn(async move { Worker::new(worker_app, rx_worker, tx_worker_for_worker).run().await });
 
     loop {
         terminal.draw(|f| {
