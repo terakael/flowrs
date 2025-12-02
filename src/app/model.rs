@@ -28,8 +28,13 @@ pub struct StatefulTable<T> {
 
 impl<T> StatefulTable<T> {
     pub fn new(items: Vec<T>) -> StatefulTable<T> {
+        let mut state = TableState::default();
+        // Select first item by default if items are present
+        if !items.is_empty() {
+            state.select(Some(0));
+        }
         StatefulTable {
-            state: TableState::default(),
+            state,
             items,
         }
     }
@@ -51,6 +56,25 @@ impl<T> StatefulTable<T> {
         };
         
         self.state.select(Some(new_pos));
+    }
+    
+    /// Ensure selection is valid after items change
+    /// Preserves current selection if still valid, otherwise selects first item
+    pub fn ensure_valid_selection(&mut self) {
+        if self.items.is_empty() {
+            self.state.select(None);
+        } else {
+            let current = self.state.selected();
+            match current {
+                Some(idx) if idx < self.items.len() => {
+                    // Current selection is valid, keep it
+                }
+                _ => {
+                    // No selection or invalid, select first item
+                    self.state.select(Some(0));
+                }
+            }
+        }
     }
 }
 

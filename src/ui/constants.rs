@@ -33,8 +33,8 @@ pub const DEFAULT_STYLE: Style = Style {
 };
 
 pub const SELECTED_STYLE: Style = Style {
-    fg: Some(Color::Black),
-    bg: Some(GREEN),
+    fg: None,  // Don't override foreground - preserve cell colors
+    bg: Some(Color::Rgb(0x3c, 0x3c, 0x3c)),  // #3c3c3c (60, 60, 60 in decimal)
     underline_color: None,
     add_modifier: Modifier::BOLD,
     sub_modifier: Modifier::empty(),

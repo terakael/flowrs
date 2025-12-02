@@ -729,7 +729,7 @@ impl Widget for &mut DagRunModel {
             Row::new(vec![
                 Line::from(match item.state.as_str() {
                     "success" => {
-                        Span::styled(DEFAULT_STATE_ICON, Style::default().fg(AirflowStateColor::Success.into()))
+                        Span::styled(DEFAULT_STATE_ICON, DEFAULT_STYLE.fg(AirflowStateColor::Success.into()))
                     }
                     "running" => {
                         Span::styled(RUNNING_STATE_ICON, DEFAULT_STYLE.fg(AirflowStateColor::Running.into()))

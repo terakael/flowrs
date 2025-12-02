@@ -428,19 +428,18 @@ impl Widget for &mut TaskInstanceModel {
                 Line::from(graph_prefix),
                 Line::from(item.task_id.as_str()),
                 Line::from(format_duration_seconds(item.duration)),
-                Line::from(state_text),
+                Line::from(Span::styled(state_text, DEFAULT_STYLE.fg(state_color.into()))),
                 Line::from(format!("{:?}", item.try_number)),
             ])
             .style(if self.marked.contains(&idx) {
                 DEFAULT_STYLE.bg(MARKED_COLOR)
             } else {
-                // Color the entire row based on state
-                let base_style = if (idx % 2) == 0 {
+                // Alternating row colors
+                if (idx % 2) == 0 {
                     DEFAULT_STYLE
                 } else {
                     DEFAULT_STYLE.bg(ALTERNATING_ROW_COLOR)
-                };
-                base_style.fg(state_color.into())
+                }
             })
         });
         // Create title with DAG name in cyan (matching focused panel color)

@@ -1060,7 +1060,7 @@ impl DagModel {
                         };
                         
                         Row::new(vec![
-                            Line::from(Span::styled(icon, Style::default().fg(color))),
+                            Line::from(Span::styled(icon, DEFAULT_STYLE.fg(color))),
                             Line::from(highlight_search_text(&item.dag_id, search_term, text_color)),
                             {
                                 let schedule = item.timetable_description.as_deref().unwrap_or("None");

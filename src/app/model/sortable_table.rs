@@ -71,9 +71,14 @@ impl<T> SortableTable<T> {
     /// * `reserved_keys` - Keys to avoid (e.g., ['j', 'k', 'g', 'G'] for navigation)
     pub fn new(headers: &[impl AsRef<str>], items: Vec<T>, reserved_keys: &[char]) -> Self {
         let columns = assign_sort_keys(headers, reserved_keys);
+        let mut state = TableState::default();
+        // Select first item by default if items are present
+        if !items.is_empty() {
+            state.select(Some(0));
+        }
         
         Self {
-            state: TableState::default(),
+            state,
             items,
             columns,
             sort_column: None,
@@ -170,6 +175,26 @@ impl<T> SortableTable<T> {
         T: CustomSort,
     {
         self.apply_sort();
+        self.ensure_valid_selection();
+    }
+    
+    /// Ensure selection is valid after items change
+    /// Preserves current selection if still valid, otherwise selects first item
+    pub fn ensure_valid_selection(&mut self) {
+        if self.items.is_empty() {
+            self.state.select(None);
+        } else {
+            let current = self.state.selected();
+            match current {
+                Some(idx) if idx < self.items.len() => {
+                    // Current selection is valid, keep it
+                }
+                _ => {
+                    // No selection or invalid, select first item
+                    self.state.select(Some(0));
+                }
+            }
+        }
     }
     
     /// Apply current sort configuration
@@ -364,5 +389,88 @@ mod tests {
         assert_eq!(columns[0].sort_key, 'o'); // g[o]
         assert_eq!(columns[1].sort_key, 'a'); // g[a]me
         assert_eq!(columns[2].sort_key, 'r'); // g[r]eat
+    }
+    
+    // Test item for selection tests
+    #[derive(Clone)]
+    struct TestItem {
+        value: String,
+    }
+    
+    impl CustomSort for TestItem {
+        fn column_value(&self, _column_index: usize) -> String {
+            self.value.clone()
+        }
+    }
+    
+    #[test]
+    fn test_new_table_selects_first_item() {
+        let items = vec![
+            TestItem { value: "item1".to_string() },
+            TestItem { value: "item2".to_string() },
+            TestItem { value: "item3".to_string() },
+        ];
+        let table: SortableTable<TestItem> = SortableTable::new(&["Value"], items, &[]);
+        
+        // First item should be selected
+        assert_eq!(table.state.selected(), Some(0));
+    }
+    
+    #[test]
+    fn test_new_empty_table_has_no_selection() {
+        let items: Vec<TestItem> = vec![];
+        let table: SortableTable<TestItem> = SortableTable::new(&["Value"], items, &[]);
+        
+        // No selection for empty table
+        assert_eq!(table.state.selected(), None);
+    }
+    
+    #[test]
+    fn test_ensure_valid_selection_preserves_valid_selection() {
+        let items = vec![
+            TestItem { value: "item1".to_string() },
+            TestItem { value: "item2".to_string() },
+            TestItem { value: "item3".to_string() },
+        ];
+        let mut table: SortableTable<TestItem> = SortableTable::new(&["Value"], items, &[]);
+        
+        // Move to second item
+        table.state.select(Some(1));
+        
+        // Ensure valid selection should preserve it
+        table.ensure_valid_selection();
+        assert_eq!(table.state.selected(), Some(1));
+    }
+    
+    #[test]
+    fn test_ensure_valid_selection_resets_invalid_selection() {
+        let items = vec![
+            TestItem { value: "item1".to_string() },
+            TestItem { value: "item2".to_string() },
+        ];
+        let mut table: SortableTable<TestItem> = SortableTable::new(&["Value"], items, &[]);
+        
+        // Set selection to out of bounds
+        table.state.select(Some(5));
+        
+        // Ensure valid selection should reset to first item
+        table.ensure_valid_selection();
+        assert_eq!(table.state.selected(), Some(0));
+    }
+    
+    #[test]
+    fn test_ensure_valid_selection_handles_no_selection() {
+        let items = vec![
+            TestItem { value: "item1".to_string() },
+            TestItem { value: "item2".to_string() },
+        ];
+        let mut table: SortableTable<TestItem> = SortableTable::new(&["Value"], items, &[]);
+        
+        // Clear selection
+        table.state.select(None);
+        
+        // Ensure valid selection should select first item
+        table.ensure_valid_selection();
+        assert_eq!(table.state.selected(), Some(0));
     }
 }

@@ -1,7 +1,7 @@
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Row, StatefulWidget, Table, Widget},
 };
@@ -9,7 +9,7 @@ use ratatui::{
 use super::popup_area;
 use crate::app::model::{filter::Filter, StatefulTable};
 use crate::ui::common::{create_headers, highlight_search_text};
-use crate::ui::constants::{ALTERNATING_ROW_COLOR, DEFAULT_STYLE, HEADER_STYLE};
+use crate::ui::constants::{ALTERNATING_ROW_COLOR, DEFAULT_STYLE, HEADER_STYLE, SELECTED_STYLE};
 
 #[derive(Clone)]
 pub struct Command<'a> {
@@ -58,13 +58,8 @@ impl<'a> CommandPopUp<'a> {
             None => self.all_commands.clone(),
         };
         self.filtered.items = filtered;
-        // Maintain selection or select first if current selection is out of bounds
-        if !self.filtered.items.is_empty() {
-            let current = self.filtered.state.selected().unwrap_or(0);
-            if current >= self.filtered.items.len() {
-                self.filtered.state.select(Some(0));
-            }
-        }
+        // Ensure selection remains valid after filtering
+        self.filtered.ensure_valid_selection();
     }
 }
 
@@ -133,11 +128,7 @@ impl Widget for &mut CommandPopUp<'_> {
                 ]))
         )
         .style(DEFAULT_STYLE)
-        .row_highlight_style(
-            Style::default()
-                .bg(Color::Rgb(60, 60, 60))
-                .add_modifier(Modifier::BOLD)
-        );
+        .row_highlight_style(SELECTED_STYLE);
         
         // Render as stateful widget
         StatefulWidget::render(table, rects[0], buf, &mut self.filtered.state);
