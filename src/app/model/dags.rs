@@ -150,15 +150,8 @@ impl DagModel {
             filtered_dags.retain(|dag| !dag.is_paused);
         }
         
-        // Step 3: Sort - UNPAUSED FIRST, then alphabetically
-        filtered_dags.sort_by(|a, b| {
-            // Primary: unpaused DAGs first
-            match (a.is_paused, b.is_paused) {
-                (false, true) => std::cmp::Ordering::Less,    // a unpaused, b paused -> a first
-                (true, false) => std::cmp::Ordering::Greater, // a paused, b unpaused -> b first
-                _ => a.dag_id.cmp(&b.dag_id),                 // Both same state -> alphabetical
-            }
-        });
+        // Step 3: Sort - Alphabetically by DAG name (paused and unpaused interleaved)
+        filtered_dags.sort_by(|a, b| a.dag_id.cmp(&b.dag_id));
         
         self.filtered.items = filtered_dags;
     }
