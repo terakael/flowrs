@@ -89,7 +89,11 @@ impl App {
         // Clear view models but not environment_state
         // This clears UI state (filters, selections) but data persists in environment_state
         self.dags.all.clear();
+        self.dags.all_variables.clear();
+        self.dags.all_connections.clear();
         self.dags.loading_status = crate::app::model::dags::LoadingStatus::NotStarted;
+        // Reset to DAGs tab when switching environments
+        self.dags.active_tab = crate::app::model::dags::DagPanelTab::Dags;
         self.dagruns.all.clear();
         self.task_instances.all.clear();
         self.logs.all.clear();

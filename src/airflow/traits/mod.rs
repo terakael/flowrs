@@ -1,16 +1,20 @@
+pub mod connection;
 pub mod dag;
 pub mod dagrun;
 pub mod dagstats;
 pub mod log;
 pub mod task;
 pub mod taskinstance;
+pub mod variable;
 
+pub use connection::ConnectionOperations;
 pub use dag::DagOperations;
 pub use dagrun::DagRunOperations;
 pub use dagstats::DagStatsOperations;
 pub use log::LogOperations;
 pub use task::TaskOperations;
 pub use taskinstance::TaskInstanceOperations;
+pub use variable::VariableOperations;
 
 use crate::airflow::config::AirflowVersion;
 use crate::airflow::model::common::ImportErrorList;
@@ -23,7 +27,7 @@ use async_trait::async_trait;
 /// to provide a consistent interface for interacting with Airflow.
 #[async_trait]
 pub trait AirflowClient:
-    DagOperations + DagRunOperations + TaskInstanceOperations + TaskOperations + LogOperations + DagStatsOperations
+    DagOperations + DagRunOperations + TaskInstanceOperations + TaskOperations + LogOperations + DagStatsOperations + VariableOperations + ConnectionOperations
 {
     /// Get the Airflow version this client is configured for
     #[allow(unused)]

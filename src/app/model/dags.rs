@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, StatefulWidget, Table, Widget, Wrap};
 use time::OffsetDateTime;
 
-use crate::airflow::model::common::{Dag, DagRun, DagStatistic, ImportError};
+use crate::airflow::model::common::{Connection, Dag, DagRun, DagStatistic, ImportError, Variable};
 use crate::app::events::custom::FlowrsEvent;
 use crate::app::model::popup::dags::commands::DAG_COMMAND_POP_UP;
 use crate::ui::common::create_headers;
@@ -29,6 +29,13 @@ pub const RECENT_RUNS_HEALTH_WINDOW: usize = 7;
 const STATE_COLUMN_WIDTH: u16 = 5;
 /// Height of the import errors panel
 const IMPORT_ERRORS_PANEL_HEIGHT: u16 = 15;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DagPanelTab {
+    Dags,
+    Variables,
+    Connections,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LoadingStatus {
@@ -86,6 +93,10 @@ impl ImportErrorWidget {
 }
 
 pub struct DagModel {
+    // Tab state
+    pub active_tab: DagPanelTab,
+    
+    // DAG tab data
     pub all: Vec<Dag>,
     pub dag_stats: HashMap<String, Vec<DagStatistic>>,
     pub recent_runs: HashMap<String, Vec<DagRun>>,  // Store recent runs for each DAG
@@ -96,6 +107,18 @@ pub struct DagModel {
     pub import_errors: ImportErrorWidget,
     pub import_error_list: Vec<ImportError>,
     pub focused_section: DagFocusedSection,
+    
+    // Variables tab data
+    pub all_variables: Vec<Variable>,
+    pub filtered_variables: StatefulTable<Variable>,
+    pub selected_variable: Option<Variable>,
+    
+    // Connections tab data
+    pub all_connections: Vec<Connection>,
+    pub filtered_connections: StatefulTable<Connection>,
+    pub selected_connection: Option<Connection>,
+    
+    // Shared UI state
     commands: Option<&'static CommandPopUp<'static>>,
     pub error_popup: Option<ErrorPopup>,
     pub loading_status: LoadingStatus,
@@ -106,6 +129,10 @@ pub struct DagModel {
 impl DagModel {
     pub fn new() -> Self {
         DagModel {
+            // Tab state - start on DAGs tab
+            active_tab: DagPanelTab::Dags,
+            
+            // DAG tab data
             all: vec![],
             dag_stats: HashMap::new(),
             recent_runs: HashMap::new(),
@@ -116,6 +143,18 @@ impl DagModel {
             import_errors: ImportErrorWidget::default(),
             import_error_list: vec![],
             focused_section: DagFocusedSection::DagTable,
+            
+            // Variables tab data
+            all_variables: vec![],
+            filtered_variables: StatefulTable::new(vec![]),
+            selected_variable: None,
+            
+            // Connections tab data
+            all_connections: vec![],
+            filtered_connections: StatefulTable::new(vec![]),
+            selected_connection: None,
+            
+            // Shared UI state
             loading_status: LoadingStatus::NotStarted,
             ticks: 0,
             commands: None,
@@ -160,6 +199,52 @@ impl DagModel {
         });
         
         self.filtered.items = filtered_dags;
+    }
+
+    pub fn filter_variables(&mut self) {
+        let prefix = &self.filter.prefix;
+        
+        let mut filtered_variables: Vec<Variable> = match prefix {
+            Some(prefix) => {
+                let lower_prefix = prefix.to_lowercase();
+                self.all_variables
+                    .iter()
+                    .filter(|var| var.key.to_lowercase().contains(&lower_prefix))
+                    .cloned()
+                    .collect()
+            }
+            None => self.all_variables.clone(),
+        };
+        
+        // Sort alphabetically by key
+        filtered_variables.sort_by(|a, b| a.key.cmp(&b.key));
+        
+        self.filtered_variables.items = filtered_variables;
+    }
+
+    pub fn filter_connections(&mut self) {
+        let prefix = &self.filter.prefix;
+        
+        let mut filtered_connections: Vec<Connection> = match prefix {
+            Some(prefix) => {
+                let lower_prefix = prefix.to_lowercase();
+                self.all_connections
+                    .iter()
+                    .filter(|conn| {
+                        let matches_id = conn.connection_id.to_lowercase().contains(&lower_prefix);
+                        let matches_type = conn.conn_type.to_lowercase().contains(&lower_prefix);
+                        matches_id || matches_type
+                    })
+                    .cloned()
+                    .collect()
+            }
+            None => self.all_connections.clone(),
+        };
+        
+        // Sort alphabetically by connection_id
+        filtered_connections.sort_by(|a, b| a.connection_id.cmp(&b.connection_id));
+        
+        self.filtered_connections.items = filtered_connections;
     }
 
     pub fn current(&mut self) -> Option<&mut Dag> {
@@ -257,13 +342,42 @@ impl Default for DagModel {
 /// Map a tag name to a consistent color using hash
 fn tag_to_color(tag_name: &str) -> Color {
     // Available colors for tags (avoiding red/green/yellow which are used for states)
+    // Using a wide variety of colors for better visual distinction
     const TAG_COLORS: &[Color] = &[
+        // Blues
         crate::ui::constants::BLUE,
-        crate::ui::constants::MAGENTA,
-        crate::ui::constants::CYAN,
         crate::ui::constants::BRIGHT_BLUE,
+        Color::Rgb(0x7f, 0xbb, 0xca),  // Light blue
+        Color::Rgb(0x5a, 0x8f, 0xb0),  // Medium blue
+        
+        // Magentas/Purples
+        crate::ui::constants::MAGENTA,
         crate::ui::constants::BRIGHT_MAGENTA,
+        Color::Rgb(0xb5, 0x89, 0xd6),  // Light purple
+        Color::Rgb(0x9d, 0x79, 0xd6),  // Medium purple
+        
+        // Cyans/Teals
+        crate::ui::constants::CYAN,
         crate::ui::constants::BRIGHT_CYAN,
+        Color::Rgb(0x83, 0xc0, 0x92),  // Light teal
+        Color::Rgb(0x6a, 0xa8, 0x9a),  // Medium teal
+        
+        // Oranges (safe, not too bright)
+        Color::Rgb(0xd6, 0x99, 0x78),  // Light orange
+        Color::Rgb(0xc0, 0x85, 0x68),  // Medium orange
+        Color::Rgb(0xa8, 0x7c, 0x5f),  // Dark orange
+        
+        // Pink/Rose
+        Color::Rgb(0xd6, 0x9c, 0xb8),  // Light pink
+        Color::Rgb(0xc5, 0x88, 0xa8),  // Medium pink
+        
+        // Olive/Brown tones
+        Color::Rgb(0xa8, 0xa0, 0x78),  // Light olive
+        Color::Rgb(0x95, 0x8d, 0x70),  // Medium olive
+        
+        // Gray-blues (for subtle distinction)
+        Color::Rgb(0x7a, 0x8b, 0x99),  // Blue-gray
+        Color::Rgb(0x8a, 0x9a, 0xa5),  // Light blue-gray
     ];
     
     let mut hasher = DefaultHasher::new();
@@ -366,12 +480,20 @@ impl Model for DagModel {
                     if self.filter.is_enabled() {
                         // Filter dialogue is open: close it and clear any filter
                         self.filter.reset();  // Closes dialogue and clears prefix
-                        self.filter_dags();
+                        match self.active_tab {
+                            DagPanelTab::Dags => self.filter_dags(),
+                            DagPanelTab::Variables => self.filter_variables(),
+                            DagPanelTab::Connections => self.filter_connections(),
+                        }
                         return (None, vec![]);
                     } else if self.filter.prefix.is_some() {
                         // Filter dialogue closed but filter is applied: clear the filter
                         self.filter.prefix = None;
-                        self.filter_dags();
+                        match self.active_tab {
+                            DagPanelTab::Dags => self.filter_dags(),
+                            DagPanelTab::Variables => self.filter_variables(),
+                            DagPanelTab::Connections => self.filter_connections(),
+                        }
                         return (None, vec![]);
                     }
                     // else: no filter active, fall through to go back to environment page
@@ -379,7 +501,12 @@ impl Model for DagModel {
                 
                 if self.filter.is_enabled() {
                     self.filter.update(key_event);
-                    self.filter_dags();
+                    // Apply filter based on active tab
+                    match self.active_tab {
+                        DagPanelTab::Dags => self.filter_dags(),
+                        DagPanelTab::Variables => self.filter_variables(),
+                        DagPanelTab::Connections => self.filter_connections(),
+                    }
                     return (None, vec![]);
                 } else if let Some(_error_popup) = &mut self.error_popup {
                     match key_event.code {
@@ -397,9 +524,9 @@ impl Model for DagModel {
                         _ => (),
                     }
                 } else {
-                    // Handle scrolling based on focused section
-                    let handled = match self.focused_section {
-                        DagFocusedSection::ImportErrors => {
+                    // Handle scrolling based on focused section and active tab
+                    let handled = match (self.active_tab, self.focused_section) {
+                        (DagPanelTab::Dags, DagFocusedSection::ImportErrors) => {
                             let max_lines = self.import_errors.cached_lines.as_ref().map(|lines| lines.len());
                             handle_vertical_scroll_keys(
                                 &mut self.import_errors.vertical_scroll,
@@ -408,8 +535,14 @@ impl Model for DagModel {
                                 max_lines,
                             )
                         }
-                        DagFocusedSection::DagTable => {
+                        (DagPanelTab::Dags, DagFocusedSection::DagTable) => {
                             handle_table_scroll_keys(&mut self.filtered, key_event)
+                        }
+                        (DagPanelTab::Variables, _) => {
+                            handle_table_scroll_keys(&mut self.filtered_variables, key_event)
+                        }
+                        (DagPanelTab::Connections, _) => {
+                            handle_table_scroll_keys(&mut self.filtered_connections, key_event)
                         }
                     };
                     
@@ -418,28 +551,78 @@ impl Model for DagModel {
                     }
                     
                     match key_event.code {
+                        KeyCode::Char('H') => {
+                            // Shift+H - Previous tab
+                            self.active_tab = match self.active_tab {
+                                DagPanelTab::Dags => DagPanelTab::Dags, // Stay on first tab
+                                DagPanelTab::Variables => {
+                                    // When switching back to DAGs tab, reset focus to table
+                                    self.focused_section = DagFocusedSection::DagTable;
+                                    DagPanelTab::Dags
+                                }
+                                DagPanelTab::Connections => DagPanelTab::Variables,
+                            };
+                            // Lazy load: trigger data load if tab hasn't been loaded yet
+                            let messages = match self.active_tab {
+                                DagPanelTab::Variables if self.all_variables.is_empty() => {
+                                    vec![WorkerMessage::UpdateVariables]
+                                }
+                                DagPanelTab::Connections if self.all_connections.is_empty() => {
+                                    vec![WorkerMessage::UpdateConnections]
+                                }
+                                _ => vec![],
+                            };
+                            return (None, messages);
+                        }
+                        KeyCode::Char('L') => {
+                            // Shift+L - Next tab
+                            self.active_tab = match self.active_tab {
+                                DagPanelTab::Dags => DagPanelTab::Variables,
+                                DagPanelTab::Variables => DagPanelTab::Connections,
+                                DagPanelTab::Connections => DagPanelTab::Connections, // Stay on last tab
+                            };
+                            // Lazy load: trigger data load if tab hasn't been loaded yet
+                            let messages = match self.active_tab {
+                                DagPanelTab::Variables if self.all_variables.is_empty() => {
+                                    vec![WorkerMessage::UpdateVariables]
+                                }
+                                DagPanelTab::Connections if self.all_connections.is_empty() => {
+                                    vec![WorkerMessage::UpdateConnections]
+                                }
+                                _ => vec![],
+                            };
+                            return (None, messages);
+                        }
                         KeyCode::Char('J') => {
-                            // Switch focus to DAG table (down)
-                            self.focused_section = DagFocusedSection::DagTable;
+                            // Switch focus to DAG table (down) - only relevant for DAGs tab with import errors
+                            if self.active_tab == DagPanelTab::Dags {
+                                self.focused_section = DagFocusedSection::DagTable;
+                            }
                         }
                         KeyCode::Char('K') => {
-                            // Switch focus to ImportErrors panel (up)
-                            if self.import_errors.cached_lines.is_some() {
+                            // Switch focus to ImportErrors panel (up) - only relevant for DAGs tab
+                            if self.active_tab == DagPanelTab::Dags && self.import_errors.cached_lines.is_some() {
                                 self.focused_section = DagFocusedSection::ImportErrors;
                             }
                         }
                         KeyCode::Char('G') => {
-                            // Jump to bottom of focused section
-                            match self.focused_section {
-                                DagFocusedSection::ImportErrors => {
+                            // Jump to bottom of active section
+                            match (self.active_tab, self.focused_section) {
+                                (DagPanelTab::Dags, DagFocusedSection::ImportErrors) => {
                                     if let Some(cached_lines) = &self.import_errors.cached_lines {
                                         self.import_errors.vertical_scroll = cached_lines.len().saturating_sub(1);
                                         self.import_errors.vertical_scroll_state = 
                                             self.import_errors.vertical_scroll_state.position(self.import_errors.vertical_scroll);
                                     }
                                 }
-                                DagFocusedSection::DagTable => {
+                                (DagPanelTab::Dags, DagFocusedSection::DagTable) => {
                                     self.filtered.state.select_last();
+                                }
+                                (DagPanelTab::Variables, _) => {
+                                    self.filtered_variables.state.select_last();
+                                }
+                                (DagPanelTab::Connections, _) => {
+                                    self.filtered_connections.state.select_last();
                                 }
                             }
                         }
@@ -481,7 +664,12 @@ impl Model for DagModel {
                         }
                         KeyCode::Char('/') => {
                             self.filter.toggle();
-                            self.filter_dags();
+                            // Apply filter based on active tab
+                            match self.active_tab {
+                                DagPanelTab::Dags => self.filter_dags(),
+                                DagPanelTab::Variables => self.filter_variables(),
+                                DagPanelTab::Connections => self.filter_connections(),
+                            }
                         }
                         KeyCode::Char('?') => {
                             self.commands = Some(&*DAG_COMMAND_POP_UP);
@@ -510,15 +698,21 @@ impl Model for DagModel {
                         KeyCode::Char('g') => {
                             if let Some(FlowrsEvent::Key(key_event)) = self.event_buffer.pop() {
                                 if key_event.code == KeyCode::Char('g') {
-                                    // Jump to top of focused section
-                                    match self.focused_section {
-                                        DagFocusedSection::ImportErrors => {
+                                    // Jump to top of active section
+                                    match (self.active_tab, self.focused_section) {
+                                        (DagPanelTab::Dags, DagFocusedSection::ImportErrors) => {
                                             self.import_errors.vertical_scroll = 0;
                                             self.import_errors.vertical_scroll_state = 
                                                 self.import_errors.vertical_scroll_state.position(0);
                                         }
-                                        DagFocusedSection::DagTable => {
+                                        (DagPanelTab::Dags, DagFocusedSection::DagTable) => {
                                             self.filtered.state.select_first();
+                                        }
+                                        (DagPanelTab::Variables, _) => {
+                                            self.filtered_variables.state.select_first();
+                                        }
+                                        (DagPanelTab::Connections, _) => {
+                                            self.filtered_connections.state.select_first();
                                         }
                                     }
                                 } else {
@@ -543,16 +737,26 @@ impl Model for DagModel {
                             ]));
                         }
                         KeyCode::Char('r') => {
-                            // Manual refresh - trigger fresh data load
-                            self.loading_status = LoadingStatus::NotStarted;
-                            return (
-                                None,
-                                vec![
-                                    WorkerMessage::UpdateDags {
-                                        only_active: !self.show_paused,
-                                    },
-                                ],
-                            );
+                            // Manual refresh - trigger fresh data load for active tab
+                            match self.active_tab {
+                                DagPanelTab::Dags => {
+                                    self.loading_status = LoadingStatus::NotStarted;
+                                    return (
+                                        None,
+                                        vec![
+                                            WorkerMessage::UpdateDags {
+                                                only_active: !self.show_paused,
+                                            },
+                                        ],
+                                    );
+                                }
+                                DagPanelTab::Variables => {
+                                    return (None, vec![WorkerMessage::UpdateVariables]);
+                                }
+                                DagPanelTab::Connections => {
+                                    return (None, vec![WorkerMessage::UpdateConnections]);
+                                }
+                            }
                         }
                         _ => return (Some(FlowrsEvent::Key(*key_event)), vec![]), // if no match, return the event
                     }
@@ -561,6 +765,294 @@ impl Model for DagModel {
                 (None, vec![])
             }
             FlowrsEvent::Mouse => (Some(event.clone()), vec![]),
+        }
+    }
+}
+
+impl DagModel {
+    fn create_tab_title(&self) -> Line<'static> {
+        // Create tab labels with highlighting for active tab
+        let tabs = vec![
+            (DagPanelTab::Dags, "DAGs"),
+            (DagPanelTab::Variables, "Variables"),
+            (DagPanelTab::Connections, "Connections"),
+        ];
+        
+        let mut spans = Vec::new();
+        for (i, (tab, label)) in tabs.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::raw(" "));
+            }
+            
+            if *tab == self.active_tab {
+                // Active tab: highlighted with cyan and bold
+                spans.push(Span::styled(
+                    format!("[{}]", label),
+                    Style::default()
+                        .fg(crate::ui::constants::CYAN)
+                        .add_modifier(Modifier::BOLD)
+                ));
+            } else {
+                // Inactive tabs: gray and not bold
+                spans.push(Span::styled(
+                    format!("[{}]", label),
+                    Style::default().fg(Color::DarkGray)
+                ));
+            }
+        }
+        
+        Line::from(spans)
+    }
+    
+    fn render_tabbed_container(&mut self, area: Rect, buf: &mut Buffer) {
+        let selected_style = crate::ui::constants::SELECTED_STYLE;
+        let border_style = if self.active_tab != DagPanelTab::Dags || self.focused_section == DagFocusedSection::DagTable {
+            DEFAULT_STYLE.fg(Color::Cyan) // Highlight when focused (or when not on DAGs tab)
+        } else {
+            DEFAULT_STYLE // Not focused (only happens on DAGs tab when import errors are focused)
+        };
+
+        // Create tab title with highlighting
+        let tab_title = self.create_tab_title();
+        
+        // Get showing/total counts based on active tab
+        let (showing_count, total_count) = match self.active_tab {
+            DagPanelTab::Dags => {
+                let showing = self.filtered.items.len();
+                let total = self.all.iter().filter(|d| d.is_active.unwrap_or(false)).count();
+                (showing, total)
+            }
+            DagPanelTab::Variables => {
+                (self.filtered_variables.items.len(), self.all_variables.len())
+            }
+            DagPanelTab::Connections => {
+                (self.filtered_connections.items.len(), self.all_connections.len())
+            }
+        };
+        
+        let status_text = match &self.loading_status {
+            LoadingStatus::LoadingInitial => " (loading...)".to_string(),
+            LoadingStatus::LoadingMore { current, total } => 
+                format!(" (loaded {}/{})", current, total),
+            LoadingStatus::Complete | LoadingStatus::NotStarted => String::new(),
+        };
+        
+        let count_text = format!("(showing {} of {}){}", showing_count, total_count, status_text);
+        
+        // Render appropriate table based on active tab
+        match self.active_tab {
+            DagPanelTab::Dags => {
+                let headers = ["State", "Name", "Schedule", "Next Run", "Tags"];
+                let header_row = create_headers(headers);
+                let header = Row::new(header_row)
+                    .style(crate::ui::constants::HEADER_STYLE);
+                let search_term = self.filter.prefix.as_deref();
+                let rows =
+                    self.filtered.items.iter().enumerate().map(|(idx, item)| {
+                        let color = self.get_dag_color(item);
+                        let text_color = if item.is_paused {
+                            Color::DarkGray
+                        } else {
+                            Color::Reset
+                        };
+                        
+                        Row::new(vec![
+                            Line::from(Span::styled("■", Style::default().fg(color))),
+                            Line::from(highlight_search_term(&item.dag_id, search_term, text_color)),
+                            {
+                                let schedule = item.timetable_description.as_deref().unwrap_or("None");
+                                let schedule_text = if schedule.starts_with("Never") {
+                                    "Never"
+                                } else {
+                                    schedule
+                                };
+                                if schedule_text == "Never" || schedule_text == "None" {
+                                    Line::from(Span::styled(schedule_text, Style::default().fg(Color::DarkGray)))
+                                } else {
+                                    Line::from(schedule_text)
+                                }
+                            },
+                            {
+                                if let Some(date) = item.next_dagrun_create_after {
+                                    Line::from(convert_datetimeoffset_to_human_readable_remaining_time(date))
+                                } else {
+                                    Line::from(Span::styled("None", Style::default().fg(Color::DarkGray)))
+                                }
+                            },
+                            {
+                                if item.tags.is_empty() {
+                                    Line::from("")
+                                } else {
+                                    let mut spans = Vec::new();
+                                    for (i, tag) in item.tags.iter().enumerate() {
+                                        if i > 0 {
+                                            spans.push(Span::raw(", "));
+                                        }
+                                        let tag_color = tag_to_color(&tag.name);
+                                        let highlighted_spans = highlight_search_term(&tag.name, search_term, tag_color);
+                                        spans.extend(highlighted_spans);
+                                    }
+                                    Line::from(spans)
+                                }
+                            },
+                        ])
+                        .style({
+                            let base_style = if (idx % 2) == 0 {
+                                DEFAULT_STYLE
+                            } else {
+                                DEFAULT_STYLE.bg(ALTERNATING_ROW_COLOR)
+                            };
+                            if item.is_paused {
+                                base_style.fg(Color::DarkGray)
+                            } else {
+                                base_style
+                            }
+                        })
+                    });
+                
+                let t = Table::new(
+                    rows,
+                    &[
+                        Constraint::Length(STATE_COLUMN_WIDTH),
+                        Constraint::Fill(2),
+                        Constraint::Length(10),
+                        Constraint::Length(10),
+                        Constraint::Fill(1),
+                    ],
+                )
+                .header(header)
+                .block(
+                    Block::default()
+                        .border_type(BorderType::Rounded)
+                        .borders(Borders::ALL)
+                        .title(tab_title)
+                        .title_bottom(Line::from(vec![
+                            Span::styled(count_text, Style::default()),
+                            Span::raw(" "),
+                            Span::styled("Press <?> for commands", Style::default().fg(Color::DarkGray)),
+                        ]))
+                        .border_style(border_style)
+                        .style(DEFAULT_STYLE),
+                )
+                .row_highlight_style(selected_style);
+
+                StatefulWidget::render(t, area, buf, &mut self.filtered.state);
+            }
+            DagPanelTab::Variables => {
+                let headers = ["Key", "Value (Preview)"];
+                let header_row = create_headers(headers);
+                let header = Row::new(header_row)
+                    .style(crate::ui::constants::HEADER_STYLE);
+                let search_term = self.filter.prefix.as_deref();
+                
+                let rows = self.filtered_variables.items.iter().enumerate().map(|(idx, item)| {
+                    // Note: Airflow API doesn't return values in the list endpoint for security
+                    // Users need to press Enter to view the full value
+                    let value_display = if item.value.is_some() {
+                        // If we have a value (from detail fetch), show truncated version
+                        let v = item.value.as_ref().unwrap();
+                        let cleaned = v.replace('\n', " ").replace('\r', "");
+                        if cleaned.len() > 80 {
+                            format!("{}...", &cleaned[..80])
+                        } else {
+                            cleaned
+                        }
+                    } else {
+                        // Value not loaded - show hint
+                        "Press Enter to view".to_string()
+                    };
+                    
+                    Row::new(vec![
+                        Line::from(highlight_search_term(&item.key, search_term, Color::Reset)),
+                        Line::from(Span::styled(value_display, Style::default().fg(Color::DarkGray))),
+                    ])
+                    .style(if (idx % 2) == 0 {
+                        DEFAULT_STYLE
+                    } else {
+                        DEFAULT_STYLE.bg(ALTERNATING_ROW_COLOR)
+                    })
+                });
+                
+                let t = Table::new(
+                    rows, 
+                    &[
+                        Constraint::Fill(1),
+                        Constraint::Fill(2),
+                    ]
+                )
+                    .header(header)
+                    .block(
+                        Block::default()
+                            .border_type(BorderType::Rounded)
+                            .borders(Borders::ALL)
+                            .title(tab_title)
+                            .title_bottom(Line::from(vec![
+                                Span::styled(count_text, Style::default()),
+                                Span::raw(" "),
+                                Span::styled("Press <?> for commands", Style::default().fg(Color::DarkGray)),
+                            ]))
+                            .border_style(border_style)
+                            .style(DEFAULT_STYLE),
+                    )
+                    .row_highlight_style(selected_style);
+                
+                StatefulWidget::render(t, area, buf, &mut self.filtered_variables.state);
+            }
+            DagPanelTab::Connections => {
+                let headers = ["ID", "Type", "Host", "Login", "Schema", "Port"];
+                let header_row = create_headers(headers);
+                let header = Row::new(header_row)
+                    .style(crate::ui::constants::HEADER_STYLE);
+                let search_term = self.filter.prefix.as_deref();
+                
+                let rows = self.filtered_connections.items.iter().enumerate().map(|(idx, item)| {
+                    // Use the same color mapping as tags for connection types
+                    let type_color = tag_to_color(&item.conn_type);
+                    
+                    Row::new(vec![
+                        Line::from(highlight_search_term(&item.connection_id, search_term, Color::Reset)),
+                        Line::from(highlight_search_term(&item.conn_type, search_term, type_color)),
+                        Line::from(item.host.as_deref().unwrap_or("-")),
+                        Line::from(item.login.as_deref().unwrap_or("-")),
+                        Line::from(item.schema.as_deref().unwrap_or("-")),
+                        Line::from(item.port.map_or("-".to_string(), |p| p.to_string())),
+                    ])
+                    .style(if (idx % 2) == 0 {
+                        DEFAULT_STYLE
+                    } else {
+                        DEFAULT_STYLE.bg(ALTERNATING_ROW_COLOR)
+                    })
+                });
+                
+                let t = Table::new(
+                    rows,
+                    &[
+                        Constraint::Fill(2),
+                        Constraint::Fill(1),
+                        Constraint::Fill(2),
+                        Constraint::Fill(1),
+                        Constraint::Fill(1),
+                        Constraint::Length(6),
+                    ],
+                )
+                .header(header)
+                .block(
+                    Block::default()
+                        .border_type(BorderType::Rounded)
+                        .borders(Borders::ALL)
+                        .title(tab_title)
+                        .title_bottom(Line::from(vec![
+                            Span::styled(count_text, Style::default()),
+                            Span::raw(" "),
+                            Span::styled("Press <?> for commands", Style::default().fg(Color::DarkGray)),
+                        ]))
+                        .border_style(border_style)
+                        .style(DEFAULT_STYLE),
+                )
+                .row_highlight_style(selected_style);
+                
+                StatefulWidget::render(t, area, buf, &mut self.filtered_connections.state);
+            }
         }
     }
 }
@@ -580,8 +1072,8 @@ impl Widget for &mut DagModel {
             area
         };
 
-        // Split into ImportErrors section and DAG table if errors exist
-        let (errors_area, dags_area) = if self.import_errors.cached_lines.is_some() {
+        // Split into ImportErrors section (always visible) and main tabbed container
+        let (errors_area, main_area) = if self.import_errors.cached_lines.is_some() {
             let rects = Layout::default()
                 .constraints([Constraint::Length(IMPORT_ERRORS_PANEL_HEIGHT), Constraint::Min(0)].as_ref())
                 .split(base_area);
@@ -590,9 +1082,9 @@ impl Widget for &mut DagModel {
             (None, base_area)
         };
 
-        // Render ImportErrors section if available
+        // Render ImportErrors section if available (separate container, always visible)
         if let (Some(errors_area), Some(cached_lines)) = (errors_area, &self.import_errors.cached_lines) {
-            let border_style = if self.focused_section == DagFocusedSection::ImportErrors {
+            let border_style = if self.active_tab == DagPanelTab::Dags && self.focused_section == DagFocusedSection::ImportErrors {
                 DEFAULT_STYLE.fg(Color::Cyan) // Highlight when focused
             } else {
                 DEFAULT_STYLE.fg(crate::ui::constants::RED) // Red border when not focused
@@ -621,128 +1113,11 @@ impl Widget for &mut DagModel {
             let mut scrollbar_state = self.import_errors.vertical_scroll_state.clone();
             scrollbar.render(errors_area, buf, &mut scrollbar_state);
         }
+        
+        // Render the main tabbed container (single container with tabs in title)
+        self.render_tabbed_container(main_area, buf);
 
-        let selected_style = crate::ui::constants::SELECTED_STYLE;
-        let dags_border_style = if self.focused_section == DagFocusedSection::DagTable {
-            DEFAULT_STYLE.fg(Color::Cyan) // Highlight when focused
-        } else {
-            DEFAULT_STYLE
-        };
-
-        let headers = ["State", "Name", "Schedule", "Next Run", "Tags"];
-        let header_row = create_headers(headers);
-        let header = Row::new(header_row)
-            .style(crate::ui::constants::HEADER_STYLE);
-        let search_term = self.filter.prefix.as_deref();
-        let rows =
-            self.filtered.items.iter().enumerate().map(|(idx, item)| {
-                // Determine DAG color based on recent runs
-                let color = self.get_dag_color(item);
-                
-                // Determine text color for DAG name
-                let text_color = if item.is_paused {
-                    Color::DarkGray
-                } else {
-                    Color::Reset
-                };
-                
-                Row::new(vec![
-                    Line::from(Span::styled("■", Style::default().fg(color))),
-                    Line::from(highlight_search_term(&item.dag_id, search_term, text_color)),
-                    {
-                        let schedule = item.timetable_description.as_deref().unwrap_or("None");
-                        // Shorten "Never, external triggers only" to just "Never"
-                        let schedule_text = if schedule.starts_with("Never") {
-                            "Never"
-                        } else {
-                            schedule
-                        };
-                        // Gray out "Never" and "None"
-                        if schedule_text == "Never" || schedule_text == "None" {
-                            Line::from(Span::styled(schedule_text, Style::default().fg(Color::DarkGray)))
-                        } else {
-                            Line::from(schedule_text)
-                        }
-                    },
-                    {
-                        if let Some(date) = item.next_dagrun_create_after {
-                            Line::from(convert_datetimeoffset_to_human_readable_remaining_time(date))
-                        } else {
-                            Line::from(Span::styled("None", Style::default().fg(Color::DarkGray)))
-                        }
-                    },
-                    {
-                        if item.tags.is_empty() {
-                            Line::from("")
-                        } else {
-                            // Create colored spans for each tag with search highlighting
-                            let mut spans = Vec::new();
-                            for (i, tag) in item.tags.iter().enumerate() {
-                                if i > 0 {
-                                    spans.push(Span::raw(", "));
-                                }
-                                let tag_color = tag_to_color(&tag.name);
-                                // Apply highlighting while preserving tag color
-                                let highlighted_spans = highlight_search_term(&tag.name, search_term, tag_color);
-                                spans.extend(highlighted_spans);
-                            }
-                            Line::from(spans)
-                        }
-                    },
-                ])
-                .style({
-                    let base_style = if (idx % 2) == 0 {
-                        DEFAULT_STYLE
-                    } else {
-                        DEFAULT_STYLE.bg(ALTERNATING_ROW_COLOR)
-                    };
-                    // Gray out paused DAGs
-                    if item.is_paused {
-                        base_style.fg(Color::DarkGray)
-                    } else {
-                        base_style
-                    }
-                })
-            });
-        let t = Table::new(
-            rows,
-            &[
-                Constraint::Length(STATE_COLUMN_WIDTH),
-                Constraint::Fill(2),
-                Constraint::Length(10),
-                Constraint::Length(10),
-                Constraint::Fill(1),
-            ],
-        )
-        .header(header)
-        .block(
-            Block::default()
-                .border_type(BorderType::Rounded)
-                .borders(Borders::ALL)
-                .title({
-                    // Calculate showing/total counts
-                    let showing_count = self.filtered.items.len();
-                    let total_count = self.all.iter().filter(|d| d.is_active.unwrap_or(false)).count();
-                    
-                    let status_text = match &self.loading_status {
-                        LoadingStatus::LoadingInitial => " (loading...)".to_string(),
-                        LoadingStatus::LoadingMore { current, total } => 
-                            format!(" (loaded {}/{})", current, total),
-                        LoadingStatus::Complete | LoadingStatus::NotStarted => String::new(),
-                    };
-                    
-                    format!(
-                        "DAGs (showing {} of {}){} - Press <?> for commands",
-                        showing_count, total_count, status_text
-                    )
-                })
-                .border_style(dags_border_style)
-                .style(DEFAULT_STYLE),
-        )
-        .row_highlight_style(selected_style);
-
-        StatefulWidget::render(t, dags_area, buf, &mut self.filtered.state);
-
+        // Render popups (they float over everything)
         if let Some(commands) = &self.commands {
             commands.render(area, buf);
         }

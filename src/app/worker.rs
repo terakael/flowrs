@@ -91,6 +91,15 @@ pub enum WorkerMessage {
         dag_id: String,
     },
     OpenItem(OpenItem),
+    // Variables and Connections
+    UpdateVariables,
+    GetVariableDetail {
+        key: String,
+    },
+    UpdateConnections,
+    GetConnectionDetail {
+        connection_id: String,
+    },
 }
 
 #[derive(Debug)]
@@ -909,6 +918,76 @@ impl Worker {
 
                 let url = client.build_open_url(&final_item)?;
                 webbrowser::open(&url).unwrap();
+            }
+            WorkerMessage::UpdateVariables => {
+                use crate::airflow::traits::VariableOperations;
+                match client.list_variables().await {
+                    Ok(variable_collection) => {
+                        debug!("Fetched {} variables", variable_collection.variables.len());
+                        let mut app = self.app.lock().unwrap();
+                        app.dags.all_variables = variable_collection.variables;
+                        app.dags.filter_variables();
+                    }
+                    Err(e) => {
+                        log::error!("Failed to fetch variables: {}", e);
+                        let mut app = self.app.lock().unwrap();
+                        app.dags.error_popup = Some(ErrorPopup::from_strings(vec![
+                            format!("Failed to fetch variables: {}", e),
+                        ]));
+                    }
+                }
+            }
+            WorkerMessage::GetVariableDetail { key } => {
+                use crate::airflow::traits::VariableOperations;
+                match client.get_variable(&key).await {
+                    Ok(variable) => {
+                        debug!("Fetched variable detail for key: {}", key);
+                        let mut app = self.app.lock().unwrap();
+                        app.dags.selected_variable = Some(variable);
+                    }
+                    Err(e) => {
+                        log::error!("Failed to fetch variable detail: {}", e);
+                        let mut app = self.app.lock().unwrap();
+                        app.dags.error_popup = Some(ErrorPopup::from_strings(vec![
+                            format!("Failed to fetch variable: {}", e),
+                        ]));
+                    }
+                }
+            }
+            WorkerMessage::UpdateConnections => {
+                use crate::airflow::traits::ConnectionOperations;
+                match client.list_connections().await {
+                    Ok(connection_collection) => {
+                        debug!("Fetched {} connections", connection_collection.connections.len());
+                        let mut app = self.app.lock().unwrap();
+                        app.dags.all_connections = connection_collection.connections;
+                        app.dags.filter_connections();
+                    }
+                    Err(e) => {
+                        log::error!("Failed to fetch connections: {}", e);
+                        let mut app = self.app.lock().unwrap();
+                        app.dags.error_popup = Some(ErrorPopup::from_strings(vec![
+                            format!("Failed to fetch connections: {}", e),
+                        ]));
+                    }
+                }
+            }
+            WorkerMessage::GetConnectionDetail { connection_id } => {
+                use crate::airflow::traits::ConnectionOperations;
+                match client.get_connection(&connection_id).await {
+                    Ok(connection) => {
+                        debug!("Fetched connection detail for id: {}", connection_id);
+                        let mut app = self.app.lock().unwrap();
+                        app.dags.selected_connection = Some(connection);
+                    }
+                    Err(e) => {
+                        log::error!("Failed to fetch connection detail: {}", e);
+                        let mut app = self.app.lock().unwrap();
+                        app.dags.error_popup = Some(ErrorPopup::from_strings(vec![
+                            format!("Failed to fetch connection: {}", e),
+                        ]));
+                    }
+                }
             }
             // ConfigSelected is handled before the client check above
             WorkerMessage::ConfigSelected(_) => {

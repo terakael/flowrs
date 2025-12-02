@@ -1,11 +1,13 @@
 pub mod model;
 
+mod connection;
 mod dag;
 mod dagrun;
 mod dagstats;
 mod log;
 mod task;
 mod taskinstance;
+mod variable;
 
 use anyhow::Result;
 use async_trait::async_trait;
