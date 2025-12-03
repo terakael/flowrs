@@ -398,16 +398,6 @@ impl Widget for &mut TaskInstanceModel {
         let header = Row::new(header_row).style(HEADER_STYLE);
 
         let rows = self.filtered.items.iter().enumerate().map(|(idx, item)| {
-            // Get graph prefix for this task (depth-based indentation)
-            let graph_prefix = self.graph_layout
-                .get(&item.task_id)
-                .map(|prefix| {
-                    let rendered = prefix.render();
-                    // Add circle marker after the connectors
-                    format!("{}◉", rendered)
-                })
-                .unwrap_or_else(|| "◉".to_string());
-            
             // Determine state and color
             let (state_text, state_color) = if let Some(state) = &item.state {
                 let color = match state.as_str() {
@@ -419,16 +409,30 @@ impl Widget for &mut TaskInstanceModel {
                     "upstream_failed" => AirflowStateColor::UpstreamFailed,
                     _ => AirflowStateColor::None,
                 };
-                (state.clone(), color)
+                (state.clone(), color.into())
             } else {
-                ("None".to_string(), AirflowStateColor::None)
+                ("None".to_string(), AirflowStateColor::None.into())
             };
             
+            // Get graph prefix for this task (depth-based indentation)
+            // Color the circle to match the state
+            let graph_line = self.graph_layout
+                .get(&item.task_id)
+                .map(|prefix| {
+                    let rendered = prefix.render();
+                    // Add circle marker after the connectors, colored by state
+                    Line::from(vec![
+                        Span::raw(rendered),
+                        Span::styled("◉", DEFAULT_STYLE.fg(state_color)),
+                    ])
+                })
+                .unwrap_or_else(|| Line::from(Span::styled("◉", DEFAULT_STYLE.fg(state_color))));
+            
             Row::new(vec![
-                Line::from(graph_prefix),
+                graph_line,
                 Line::from(item.task_id.as_str()),
                 Line::from(format_duration_seconds(item.duration)),
-                Line::from(Span::styled(state_text, DEFAULT_STYLE.fg(state_color.into()))),
+                Line::from(Span::styled(state_text, DEFAULT_STYLE.fg(state_color))),
                 Line::from(format!("{:?}", item.try_number)),
             ])
             .style(if self.marked.contains(&idx) {
