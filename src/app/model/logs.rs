@@ -1,4 +1,4 @@
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
@@ -49,6 +49,7 @@ pub struct LogModel {
     ticks: u32,
     vertical_scroll: usize,
     vertical_scroll_state: ScrollbarState,
+    horizontal_scroll: u16,               // Horizontal scroll offset for long lines
     last_viewport_height: usize,          // Cached from last render for auto-load
     cached_lines: Vec<String>,            // CACHE: Parsed lines to avoid reparsing every frame
     cached_content_hash: u64,             // Hash to detect when content changes
@@ -71,6 +72,7 @@ impl LogModel {
             ticks: 0,
             vertical_scroll: 0,
             vertical_scroll_state: ScrollbarState::default(),
+            horizontal_scroll: 0,
             last_viewport_height: 20,  // Default viewport size
             cached_lines: Vec::new(),
             cached_content_hash: 0,
@@ -141,6 +143,23 @@ impl Model for LogModel {
                         return (None, vec![msg]);
                     }
                     return (None, vec![]);
+                }
+                
+                // Handle horizontal scrolling with Shift+H/L
+                if key.modifiers == KeyModifiers::SHIFT {
+                    match key.code {
+                        KeyCode::Char('H') | KeyCode::Char('h') => {
+                            // Scroll left
+                            self.horizontal_scroll = self.horizontal_scroll.saturating_sub(5);
+                            return (None, vec![]);
+                        }
+                        KeyCode::Char('L') | KeyCode::Char('l') => {
+                            // Scroll right
+                            self.horizontal_scroll = self.horizontal_scroll.saturating_add(5);
+                            return (None, vec![]);
+                        }
+                        _ => {}
+                    }
                 }
                 
                 match key.code {
@@ -441,7 +460,7 @@ impl Widget for &mut LogModel {
             // NO WRAPPING - long lines truncate at screen edge (like vim/less)
             // This ensures 1 logical line = 1 visual line for accurate scrolling
             .style(Style::default().fg(Color::White))
-            .scroll((window_scroll as u16, 0));
+            .scroll((window_scroll as u16, self.horizontal_scroll));
         
         paragraph.render(chunks[1], buffer);
         
