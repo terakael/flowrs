@@ -107,14 +107,9 @@ impl App {
         // Clear view models but not environment_state
         // This clears UI state (filters, selections) but data persists in environment_state
         self.dags.all.clear();
-        self.dags.all_variables.clear();
-        self.dags.all_connections.clear();
-        self.dags.loading_status = crate::app::model::dags::LoadingStatus::NotStarted;
-        // Reset to DAGs tab when switching environments
-        self.dags.active_tab = crate::app::model::dags::DagPanelTab::Dags;
         self.dagruns.all.clear();
         self.task_instances.all.clear();
-        self.logs.all.clear();
+        self.logs.current_log_data = None;
     }
 
     /// Sync panel data from `environment_state`
@@ -192,11 +187,12 @@ impl App {
                 if let (Some(dag_id), Some(dag_run_id), Some(task_id)) =
                     (&self.logs.dag_id, &self.logs.dag_run_id, &self.logs.task_id)
                 {
-                    self.logs.all = self
+                    // Copy current attempt's log data to panel
+                    self.logs.current_log_data = self
                         .environment_state
-                        .get_active_task_logs(dag_id, dag_run_id, task_id);
+                        .get_active_task_log(dag_id, dag_run_id, task_id, self.logs.current_attempt as u16);
                 } else {
-                    self.logs.all.clear();
+                    self.logs.current_log_data = None;
                 }
             }
             Panel::Config => {

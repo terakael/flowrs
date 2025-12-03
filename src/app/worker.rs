@@ -71,6 +71,21 @@ pub enum WorkerMessage {
         task_try: u16,
         clear: bool,
     },
+    /// Ensure a specific attempt's log is loaded (checks cache first)
+    EnsureTaskLogLoaded {
+        dag_id: String,
+        dag_run_id: String,
+        task_id: String,
+        task_try: u16,
+    },
+    /// Load next chunk for current log (auto-triggered on scroll)
+    LoadMoreTaskLogChunk {
+        dag_id: String,
+        dag_run_id: String,
+        task_id: String,
+        task_try: u16,
+        continuation_token: String,
+    },
     MarkDagRun {
         dag_run_id: String,
         dag_id: String,
@@ -756,43 +771,143 @@ impl Worker {
                 dag_run_id,
                 task_id,
                 task_try,
-                clear: _,
+                clear,
             } => {
-                debug!("Getting logs for task: {task_id}, try number {task_try}");
-                let logs = join_all(
-                    (1..=task_try)
-                        .map(|i| client.get_task_logs(&dag_id, &dag_run_id, &task_id, i))
-                        .collect::<Vec<_>>(),
-                )
-                .await;
-
-                // Note: dag_id, dag_run_id, and task_id are already set in the event loop before this runs
-
-                let mut app = self.app.lock().unwrap();
-                let mut collected_logs = Vec::new();
-                for log in logs {
-                    match log {
-                        Ok(log) => {
-                            debug!("Got log: {log:?}");
-                            collected_logs.push(log);
-                        }
-                        Err(e) => {
-                            debug!("Error getting logs: {e}");
-                            app.logs.error_popup =
-                                Some(ErrorPopup::from_strings(vec![e.to_string()]));
-                        }
-                    }
-                }
-
-                // Store logs in the environment state
-                if !collected_logs.is_empty() {
+                debug!("Loading first chunk for task: {task_id}, try: {task_try} (highest)");
+                
+                // Clear if requested
+                if clear {
+                    let mut app = self.app.lock().unwrap();
                     if let Some(env) = app.environment_state.get_active_environment_mut() {
-                        env.add_task_logs(&dag_id, &dag_run_id, &task_id, collected_logs);
+                        env.clear_task_log(&dag_id, &dag_run_id, &task_id, task_try);
                     }
                 }
-
-                // Sync panel data from environment state to refresh with new API data
-                app.sync_panel_data();
+                
+                // Fetch first chunk (no continuation token)
+                let log_result = client.get_task_logs_paginated(
+                    &dag_id,
+                    &dag_run_id,
+                    &task_id,
+                    task_try,
+                    None,  // No token = first chunk
+                ).await;
+                
+                match log_result {
+                    Ok(log) => {
+                        debug!("Received log chunk: {} bytes, continuation_token: {:?}", 
+                            log.content.len(), log.continuation_token);
+                        
+                        let mut app = self.app.lock().unwrap();
+                        
+                        if let Some(env) = app.environment_state.get_active_environment_mut() {
+                            env.add_task_log_chunk(&dag_id, &dag_run_id, &task_id, task_try, log);
+                        }
+                        
+                        app.logs.is_loading_initial = false;  // Clear loading flag
+                        app.sync_panel_data();
+                    }
+                    Err(e) => {
+                        let mut app = self.app.lock().unwrap();
+                        app.logs.is_loading_initial = false;  // Clear loading flag on error too
+                        app.logs.error_popup = Some(ErrorPopup::from_strings(vec![
+                            format!("Failed to load logs: {}", e)
+                        ]));
+                    }
+                }
+            }
+            WorkerMessage::EnsureTaskLogLoaded {
+                dag_id,
+                dag_run_id,
+                task_id,
+                task_try,
+            } => {
+                // Check if already cached
+                let needs_fetch = {
+                    let mut app = self.app.lock().unwrap();
+                    if let Some(env) = app.environment_state.get_active_environment() {
+                        if let Some(_task_log) = env.get_task_log(&dag_id, &dag_run_id, &task_id, task_try) {
+                            false  // Cache hit
+                        } else {
+                            app.logs.is_loading_initial = true;  // Show loading for cache miss
+                            true   // Cache miss
+                        }
+                    } else {
+                        false
+                    }
+                };
+                
+                if needs_fetch {
+                    debug!("Cache miss - fetching first chunk for try {task_try}");
+                    
+                    let log_result = client.get_task_logs_paginated(
+                        &dag_id,
+                        &dag_run_id,
+                        &task_id,
+                        task_try,
+                        None,
+                    ).await;
+                    
+                    if let Ok(log) = log_result {
+                        let mut app = self.app.lock().unwrap();
+                        if let Some(env) = app.environment_state.get_active_environment_mut() {
+                            env.add_task_log_chunk(&dag_id, &dag_run_id, &task_id, task_try, log);
+                        }
+                        app.logs.is_loading_initial = false;  // Clear loading flag
+                        app.sync_panel_data();
+                        
+                        // Evict old attempts from cache (keep last 5)
+                        let keep_attempts: Vec<u16> = app.logs.lru_cache.iter().copied().collect();
+                        if let Some(env) = app.environment_state.get_active_environment_mut() {
+                            env.evict_task_logs_not_in_cache(&dag_id, &dag_run_id, &task_id, &keep_attempts);
+                        }
+                    } else {
+                        let mut app = self.app.lock().unwrap();
+                        app.logs.is_loading_initial = false;  // Clear on error
+                    }
+                } else {
+                    debug!("Cache hit - using existing chunks for try {task_try}");
+                    let mut app = self.app.lock().unwrap();
+                    app.sync_panel_data();
+                }
+            }
+            WorkerMessage::LoadMoreTaskLogChunk {
+                dag_id,
+                dag_run_id,
+                task_id,
+                task_try,
+                continuation_token,
+            } => {
+                debug!("Loading next chunk with token: {continuation_token}");
+                
+                let log_result = client.get_task_logs_paginated(
+                    &dag_id,
+                    &dag_run_id,
+                    &task_id,
+                    task_try,
+                    Some(&continuation_token),
+                ).await;
+                
+                match log_result {
+                    Ok(log) => {
+                        debug!("LoadMore: Received chunk: {} bytes, continuation_token: {:?}", 
+                            log.content.len(), log.continuation_token);
+                        
+                        let mut app = self.app.lock().unwrap();
+                        if let Some(env) = app.environment_state.get_active_environment_mut() {
+                            env.add_task_log_chunk(&dag_id, &dag_run_id, &task_id, task_try, log);
+                        }
+                        app.logs.is_loading_more = false;
+                        app.sync_panel_data();
+                    }
+                    Err(e) => {
+                        let mut app = self.app.lock().unwrap();
+                        app.logs.is_loading_more = false;
+                        app.logs.error_popup = Some(ErrorPopup::from_strings(vec![
+                            format!("Failed to load more logs: {}", e),
+                            "Existing content is still available.".to_string(),
+                        ]));
+                    }
+                }
             }
             WorkerMessage::MarkDagRun {
                 dag_run_id,

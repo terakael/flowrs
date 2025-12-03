@@ -12,18 +12,71 @@ pub type DagId = String;
 pub type DagRunId = String;
 pub type TaskId = String;
 
+/// Represents a single chunk of log content
+#[derive(Debug, Clone)]
+pub struct LogChunk {
+    pub content: String,
+    pub continuation_token: Option<String>,
+}
+
+/// Represents all chunks for a single task attempt
+#[derive(Debug, Clone)]
+pub struct TaskLog {
+    pub chunks: Vec<LogChunk>,
+    pub current_continuation_token: Option<String>,
+    pub is_complete: bool,
+}
+
+impl TaskLog {
+    pub fn new() -> Self {
+        Self {
+            chunks: Vec::new(),
+            current_continuation_token: None,
+            is_complete: false,
+        }
+    }
+    
+    pub fn add_chunk(&mut self, log: Log) {
+        self.chunks.push(LogChunk {
+            content: log.content.clone(),
+            continuation_token: log.continuation_token.clone(),
+        });
+        self.current_continuation_token = log.continuation_token.clone();
+        self.is_complete = log.continuation_token.is_none();
+    }
+    
+    /// Get all content as a single string
+    pub fn full_content(&self) -> String {
+        self.chunks
+            .iter()
+            .map(|chunk| chunk.content.as_str())
+            .collect::<Vec<_>>()
+            .join("")
+    }
+    
+    /// Get total line count across all loaded chunks
+    pub fn total_lines(&self) -> usize {
+        self.chunks.iter().map(|c| c.content.lines().count()).sum()
+    }
+    
+    /// Check if we can load more chunks
+    pub fn has_more(&self) -> bool {
+        !self.is_complete
+    }
+}
+
 /// State for a specific task instance's logs
 #[derive(Debug, Clone)]
 pub struct TaskInstanceData {
     pub task_instance: TaskInstance,
-    pub logs: Vec<Log>,
+    pub logs: HashMap<u16, TaskLog>,  // Key = try_number
 }
 
 impl TaskInstanceData {
     pub fn new(task_instance: TaskInstance) -> Self {
         Self {
             task_instance,
-            logs: Vec::new(),
+            logs: HashMap::new(),
         }
     }
 }
@@ -146,12 +199,74 @@ impl EnvironmentData {
         }
     }
 
-    /// Add logs to a task instance
-    pub fn add_task_logs(&mut self, dag_id: &str, dag_run_id: &str, task_id: &str, logs: Vec<Log>) {
+    /// Add a log chunk for a specific task attempt
+    pub fn add_task_log_chunk(
+        &mut self,
+        dag_id: &str,
+        dag_run_id: &str,
+        task_id: &str,
+        task_try: u16,
+        log: Log,
+    ) {
         if let Some(dag_data) = self.dags.get_mut(dag_id) {
             if let Some(dag_run_data) = dag_data.dag_runs.get_mut(dag_run_id) {
                 if let Some(task_data) = dag_run_data.task_instances.get_mut(task_id) {
-                    task_data.logs = logs;
+                    let task_log = task_data.logs
+                        .entry(task_try)
+                        .or_insert_with(TaskLog::new);
+                    task_log.add_chunk(log);
+                }
+            }
+        }
+    }
+
+    /// Get a specific task attempt's log
+    pub fn get_task_log(
+        &self,
+        dag_id: &str,
+        dag_run_id: &str,
+        task_id: &str,
+        task_try: u16,
+    ) -> Option<&TaskLog> {
+        self.dags
+            .get(dag_id)?
+            .dag_runs
+            .get(dag_run_id)?
+            .task_instances
+            .get(task_id)?
+            .logs
+            .get(&task_try)
+    }
+
+    /// Clear log chunks for a specific task attempt
+    pub fn clear_task_log(
+        &mut self,
+        dag_id: &str,
+        dag_run_id: &str,
+        task_id: &str,
+        task_try: u16,
+    ) {
+        if let Some(dag_data) = self.dags.get_mut(dag_id) {
+            if let Some(dag_run_data) = dag_data.dag_runs.get_mut(dag_run_id) {
+                if let Some(task_data) = dag_run_data.task_instances.get_mut(task_id) {
+                    task_data.logs.remove(&task_try);
+                }
+            }
+        }
+    }
+
+    /// Evict log attempts not in the LRU cache
+    pub fn evict_task_logs_not_in_cache(
+        &mut self,
+        dag_id: &str,
+        dag_run_id: &str,
+        task_id: &str,
+        keep_attempts: &[u16],
+    ) {
+        if let Some(dag_data) = self.dags.get_mut(dag_id) {
+            if let Some(dag_run_data) = dag_data.dag_runs.get_mut(dag_run_id) {
+                if let Some(task_data) = dag_run_data.task_instances.get_mut(task_id) {
+                    task_data.logs.retain(|&try_num, _| keep_attempts.contains(&try_num));
                 }
             }
         }
@@ -278,14 +393,11 @@ impl EnvironmentStateContainer {
             .unwrap_or_default()
     }
 
-    /// Get logs for a specific task instance in the active environment
-    pub fn get_active_task_logs(&self, dag_id: &str, dag_run_id: &str, task_id: &str) -> Vec<Log> {
+    /// Get logs for a specific task instance attempt in the active environment
+    pub fn get_active_task_log(&self, dag_id: &str, dag_run_id: &str, task_id: &str, task_try: u16) -> Option<TaskLog> {
         self.get_active_environment()
-            .and_then(|env| env.get_dag(dag_id))
-            .and_then(|dag_data| dag_data.get_dag_run(dag_run_id))
-            .and_then(|run_data| run_data.get_task_instance(task_id))
-            .map(|task_data| task_data.logs.clone())
-            .unwrap_or_default()
+            .and_then(|env| env.get_task_log(dag_id, dag_run_id, task_id, task_try))
+            .cloned()
     }
 
     /// Get a specific DAG by ID from the active environment

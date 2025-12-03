@@ -131,17 +131,18 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: Arc<Mutex<App>
                             dag_id,
                             dag_run_id,
                             task_id,
+                            task_try,
                             clear,
-                            ..
                         } => {
                             if *clear {
                                 app.logs.dag_id = Some(dag_id.clone());
                                 app.logs.dag_run_id = Some(dag_run_id.clone());
                                 app.logs.task_id = Some(task_id.clone());
-                                // Sync cached data immediately
-                                app.logs.all = app
-                                    .environment_state
-                                    .get_active_task_logs(dag_id, dag_run_id, task_id);
+                                app.logs.tries = Some(*task_try);
+                                app.logs.current_attempt = *task_try as usize;
+                                app.logs.update_lru(*task_try);
+                                app.logs.is_loading_initial = true;  // Show loading feedback
+                                // Current log data will be synced after worker completes
                             }
                         }
                         _ => {}
