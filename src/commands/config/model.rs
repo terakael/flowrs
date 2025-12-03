@@ -61,6 +61,8 @@ pub struct UpdateCommand {
 pub enum ConfigOption {
     BasicAuth,
     Token(Command),
+    #[strum(serialize = "Google Cloud Composer")]
+    Composer,
 }
 
 #[derive(Parser, Debug)]

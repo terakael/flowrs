@@ -40,8 +40,24 @@ impl FlowrsApp {
     }
 }
 
+// Initialize rustls crypto provider for gcp_auth
+// This uses ring as the crypto backend
+fn init_crypto_provider() {
+    use std::sync::Once;
+    static CRYPTO_PROVIDER_INIT: Once = Once::new();
+    
+    CRYPTO_PROVIDER_INIT.call_once(|| {
+        // Try to install the default crypto provider (ring)
+        // This may fail if already installed, which is fine
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Initialize crypto provider before any async operations
+    init_crypto_provider();
+    
     let app = FlowrsApp::parse();
     app.run().await?;
     std::process::exit(0);

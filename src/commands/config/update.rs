@@ -73,6 +73,11 @@ impl UpdateCommand {
                     password: format!("${{{}}}", password.trim_start_matches('$').trim_start_matches('{').trim_end_matches('}')),
                 });
             }
+            ConfigOption::Composer => {
+                println!("⚠️  Composer authentication cannot be updated directly.");
+                println!("   Please remove the config and add it again.");
+                return Err(anyhow::anyhow!("Composer configs cannot be updated"));
+            }
             ConfigOption::Token(_) => {
                 println!("\n📝 Choose token authentication method:");
                 println!("   1. Command: Execute a shell command to get the token (e.g., 'echo $TOKEN')");

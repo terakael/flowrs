@@ -8,12 +8,21 @@ use crate::{
     airflow::config::{
         AirflowAuth, AirflowConfig, AirflowVersion, BasicAuth, FlowrsConfig, TokenCmd,
     },
+    airflow::managed_services::composer,
     commands::config::model::{prompt_proxy_config, validate_endpoint, ConfigOption},
 };
 use anyhow::Result;
 
 impl AddCommand {
     pub fn run(&self) -> Result<()> {
+        let auth_type =
+            Select::new("authentication type", ConfigOption::iter().collect()).prompt()?;
+
+        // For Composer, handle separately as it uses async
+        if matches!(auth_type, ConfigOption::Composer) {
+            return self.run_composer_add();
+        }
+
         let name = inquire::Text::new("name").prompt()?;
         let endpoint = inquire::Text::new("endpoint")
             .with_validator(validate_endpoint)
@@ -30,9 +39,6 @@ impl AddCommand {
             "v3" => AirflowVersion::V3,
             _ => AirflowVersion::V2,
         };
-
-        let auth_type =
-            Select::new("authentication type", ConfigOption::iter().collect()).prompt()?;
 
         let new_config = match auth_type {
             ConfigOption::BasicAuth => {
@@ -58,6 +64,10 @@ impl AddCommand {
                     version,
                     proxy,
                 }
+            }
+            ConfigOption::Composer => {
+                // This case is already handled at the top of the function
+                unreachable!("Composer auth is handled separately")
             }
             ConfigOption::Token(_) => {
                 println!("\n📝 Choose token authentication method:");
@@ -116,6 +126,61 @@ impl AddCommand {
         config.write_to_file()?;
 
         println!("✅ Config added successfully!");
+        Ok(())
+    }
+
+    fn run_composer_add(&self) -> Result<()> {
+        println!("\n🌩️  Google Cloud Composer Configuration");
+        println!("   This uses Application Default Credentials (ADC) for authentication.");
+        println!("   Make sure you have set up GCP credentials:");
+        println!("     • Run: gcloud auth application-default login");
+        println!("     • Or set GOOGLE_APPLICATION_CREDENTIALS to a service account key file\n");
+
+        let name = inquire::Text::new("name")
+            .with_help_message("A friendly name for this Composer environment")
+            .prompt()?;
+
+        let endpoint = inquire::Text::new("Airflow web server URL")
+            .with_validator(validate_endpoint)
+            .with_help_message("The Composer Airflow UI URL (e.g., https://abc123.composer.googleusercontent.com)")
+            .prompt()?;
+
+        let version_str = inquire::Select::new("Airflow version", vec!["v2", "v3"])
+            .with_help_message("Composer 2 uses Airflow v2, Composer 3 uses Airflow v3")
+            .prompt()?;
+
+        let version = match version_str {
+            "v3" => AirflowVersion::V3,
+            _ => AirflowVersion::V2,
+        };
+
+        // Create the Composer config using async runtime
+        let rt = tokio::runtime::Runtime::new()?;
+        let new_config = rt.block_on(async {
+            composer::create_composer_config(name, endpoint, version).await
+        })?;
+
+        let path = self.file.as_ref().map(PathBuf::from);
+        let mut config = FlowrsConfig::from_file(path.as_ref())?;
+
+        // If the user provided a custom path, override the config path
+        if let Some(user_path) = path {
+            config.path = Some(user_path);
+        }
+
+        if let Some(mut servers) = config.servers.clone() {
+            servers.retain(|server| server.name != new_config.name && server.managed.is_none());
+            servers.push(new_config);
+            config.servers = Some(servers);
+        } else {
+            config.servers = Some(vec![new_config]);
+        }
+
+        config.write_to_file()?;
+
+        println!("✅ Composer config added successfully!");
+        println!("   Note: Composer auth is not persisted to config file.");
+        println!("   Authentication will use ADC each time you run flowrs.");
         Ok(())
     }
 }

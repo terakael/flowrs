@@ -189,14 +189,8 @@ pub async fn get_mwaa_environment_servers() -> Result<Vec<AirflowConfig>> {
         let web_token = client.create_web_login_token(&env_name).await?;
         let session_cookie = client.get_session_cookie(&web_token).await?;
 
-        // Ensure the endpoint has a proper scheme (MWAA webserver URLs may not include https://)
-        let endpoint = if env.webserver_url.starts_with("http://")
-            || env.webserver_url.starts_with("https://")
-        {
-            env.webserver_url.clone()
-        } else {
-            format!("https://{}", env.webserver_url)
-        };
+        // Normalize the endpoint URL
+        let endpoint = crate::airflow::config::normalize_endpoint(env.webserver_url);
 
         servers.push(AirflowConfig {
             name: env.name.clone(),

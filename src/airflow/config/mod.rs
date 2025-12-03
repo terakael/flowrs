@@ -22,6 +22,41 @@ pub fn expand_env_vars(value: &str) -> Result<String> {
         .map_err(|e| anyhow::anyhow!("Failed to expand environment variable in '{}': {}", value, e))
 }
 
+/// Normalizes an endpoint URL by ensuring it has a scheme and trailing slash.
+/// 
+/// # Arguments
+/// * `endpoint` - The endpoint URL to normalize
+/// 
+/// # Returns
+/// A normalized URL with `https://` prefix (if no scheme) and trailing slash
+/// 
+/// # Examples
+/// ```
+/// use flowrs_tui::airflow::config::normalize_endpoint;
+/// 
+/// assert_eq!(
+///     normalize_endpoint("example.com".to_string()),
+///     "https://example.com/"
+/// );
+/// assert_eq!(
+///     normalize_endpoint("https://example.com".to_string()),
+///     "https://example.com/"
+/// );
+/// ```
+pub fn normalize_endpoint(endpoint: String) -> String {
+    let mut normalized = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        endpoint
+    } else {
+        format!("https://{}", endpoint)
+    };
+
+    if !normalized.ends_with('/') {
+        normalized.push('/');
+    }
+
+    normalized
+}
+
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Default)]
 pub enum AirflowVersion {
     #[default]
@@ -90,6 +125,7 @@ pub enum AirflowAuth {
     Conveyor,
     Mwaa(super::managed_services::mwaa::MwaaAuth),
     Astronomer(super::managed_services::astronomer::AstronomerAuth),
+    Composer(super::managed_services::composer::ComposerAuth),
 }
 
 #[derive(Deserialize, Serialize, Clone)]

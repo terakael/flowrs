@@ -128,6 +128,18 @@ impl BaseClient {
                     .request(method, url)
                     .bearer_auth(&auth.api_token))
             }
+            AirflowAuth::Composer(auth) => {
+                info!("🔑 Google Cloud Composer Auth");
+                // Get the client and fetch a fresh token
+                // Note: This is a blocking call in an async context, but it's brief
+                let token = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        let client = auth.get_client().await?;
+                        client.get_token().await
+                    })
+                })?;
+                Ok(self.client.request(method, url).bearer_auth(token))
+            }
         }
     }
 

@@ -255,19 +255,8 @@ pub async fn get_astronomer_environment_servers() -> (Vec<AirflowConfig>, Vec<St
                 continue;
             };
 
-            // Ensure the endpoint has a proper scheme and trailing slash
-            let mut endpoint = if deployment.web_server_url.starts_with("http://")
-                || deployment.web_server_url.starts_with("https://")
-            {
-                deployment.web_server_url.clone()
-            } else {
-                format!("https://{}", deployment.web_server_url)
-            };
-
-            // Add trailing slash if not present (required for correct URL joining)
-            if !endpoint.ends_with('/') {
-                endpoint.push('/');
-            }
+            // Normalize the endpoint URL
+            let endpoint = crate::airflow::config::normalize_endpoint(deployment.web_server_url);
 
             info!(
                 "Discovered Astronomer deployment: {}/{} ({})",
