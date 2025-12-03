@@ -6,8 +6,8 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use super::constants::{
-    AirflowStateColor, BLACK, BLUE, BRIGHT_BLUE, BRIGHT_CYAN, BRIGHT_GREEN, BRIGHT_MAGENTA,
-    BRIGHT_RED, BRIGHT_WHITE, BRIGHT_YELLOW, CYAN, DEFAULT_STATE_ICON, HEADER_STYLE, MAGENTA,
+    AirflowStateColor, BLUE, BRIGHT_BLUE, BRIGHT_CYAN, BRIGHT_GREEN, BRIGHT_MAGENTA, BRIGHT_RED,
+    BRIGHT_WHITE, BRIGHT_YELLOW, CYAN, DEFAULT_STATE_ICON, FOREGROUND, HEADER_STYLE, MAGENTA,
     RUNNING_STATE_ICON, WHITE,
 };
 
@@ -130,11 +130,12 @@ pub fn highlight_search_text<'a>(text: &'a str, search: Option<&str>, base_color
             ));
         }
         
-        // Add highlighted matching part with yellow background and dark text
+        // Add highlighted matching part with yellow background and cream foreground
+        // Use FOREGROUND color for better readability
         spans.push(Span::styled(
             &text[idx..idx + search.len()],
             Style::default()
-                .fg(BLACK)
+                .fg(FOREGROUND)
                 .bg(BRIGHT_YELLOW),
         ));
         
