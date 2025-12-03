@@ -14,8 +14,8 @@ use super::V1Client;
 
 #[async_trait]
 impl DagOperations for V1Client {
-    async fn list_dags_paginated(&self, offset: i64, limit: i64, only_active: bool) -> Result<DagList> {
-        debug!("list_dags_paginated called with offset={}, limit={}, only_active={}", offset, limit, only_active);
+    async fn list_dags_paginated(&self, offset: i64, limit: i64) -> Result<DagList> {
+        debug!("list_dags_paginated called with offset={}, limit={}", offset, limit);
         
         let response = self
             .base_api(Method::GET, "dags")?
@@ -52,11 +52,11 @@ impl DagOperations for V1Client {
         })
     }
 
-    async fn list_dags(&self, only_active: bool) -> Result<DagList> {
-        // Fetch all DAGs using pagination
-        // Note: only_active filters by is_active (scheduler visibility), not is_paused
-        // Since we want to filter by pause state, we fetch all DAGs and filter locally
-        debug!("list_dags called with only_active={}, fetching all DAGs with pagination", only_active);
+    async fn list_dags(&self) -> Result<DagList> {
+        // Fetch all active DAGs using pagination
+        // Returns only DAGs with is_active=true (valid/schedulable DAGs)
+        // Paused vs unpaused filtering happens in the UI layer
+        debug!("list_dags called, fetching all active DAGs with pagination");
         
         let mut all_dags = Vec::new();
         let mut offset = 0;
@@ -64,7 +64,7 @@ impl DagOperations for V1Client {
         let mut total_entries = 0;
         
         loop {
-            let page = self.list_dags_paginated(offset, limit, only_active).await?;
+            let page = self.list_dags_paginated(offset, limit).await?;
             
             total_entries = page.total_entries;
             let fetched_count = page.dags.len();
@@ -80,7 +80,7 @@ impl DagOperations for V1Client {
             offset += limit;
         }
         
-        info!("DAGs fetched: {} out of {} total (only_active: {})", all_dags.len(), total_entries, only_active);
+        info!("Active DAGs fetched: {} out of {} total", all_dags.len(), total_entries);
         
         Ok(DagList { 
             dags: all_dags,

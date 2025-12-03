@@ -147,6 +147,20 @@ impl EnvironmentData {
         self.dags.get(dag_id)
     }
 
+    /// Clear all DAG data from this environment.
+    /// 
+    /// Note: Preserves task_order and task_dependencies as they represent
+    /// DAG structural metadata (not runtime state). These are expensive to
+    /// recompute and should only be invalidated when:
+    /// - DAG code changes (file_token/last_parsed_time changes)
+    /// - User manually refreshes task structure (press 'r' in TaskInstance panel)
+    /// - Environment switch occurs
+    pub fn clear_dags(&mut self) {
+        self.dags.clear();
+        self.dag_details.clear();
+        // Preserve task_order and task_dependencies (structural metadata)
+    }
+
     /// Update or create a DAG in the environment
     pub fn upsert_dag(&mut self, dag: Dag) {
         let dag_id = dag.dag_id.clone();
@@ -342,6 +356,13 @@ impl EnvironmentStateContainer {
 
     pub fn get_active_client(&self) -> Option<Arc<dyn AirflowClientTrait>> {
         self.get_active_environment().map(|env| env.client.clone())
+    }
+
+    /// Clear all DAGs from the active environment
+    pub fn clear_active_environment_dags(&mut self) {
+        if let Some(env) = self.get_active_environment_mut() {
+            env.clear_dags();
+        }
     }
 
     /// Get all DAGs for the active environment

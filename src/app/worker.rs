@@ -20,11 +20,8 @@ pub struct Worker {
 #[derive(Debug)]
 pub enum WorkerMessage {
     ConfigSelected(usize),
-    UpdateDags {
-        only_active: bool,
-    },
+    UpdateDags,
     FetchMoreDags {
-        only_active: bool,
         offset: i64,
         limit: i64,
     },
@@ -54,9 +51,6 @@ pub enum WorkerMessage {
     },
     GetDagDetails {
         dag_id: String,
-    },
-    UpdateDagStats {
-        clear: bool,
     },
     UpdateRecentDagRuns,  // Fetch recent runs for all DAGs
     UpdateImportErrors,
@@ -182,16 +176,24 @@ impl Worker {
         }
         let client = client.unwrap();
         match message {
-            WorkerMessage::UpdateDags { only_active } => {
+            WorkerMessage::UpdateDags => {
+                // Always clear backend first (instant if empty on initial load)
+                // This is a hard refresh - backend and frontend both get cleared
+                {
+                    let mut app = self.app.lock().unwrap();
+                    app.environment_state.clear_active_environment_dags();
+                    app.dags.recent_runs.clear();
+                }
+                
                 // Fetch initial 10 DAGs for immediate display
                 let start = std::time::Instant::now();
                 debug!("[PERF] Starting UpdateDags - fetching first 10 DAGs");
-                let dag_list = client.list_dags_paginated(0, 10, only_active).await;
+                let dag_list = client.list_dags_paginated(0, 10).await;
                 debug!("[PERF] UpdateDags: list_dags_paginated took {:?}", start.elapsed());
                 match dag_list {
                     Ok(dag_list) => {
                         let total = dag_list.total_entries;
-                        debug!("Received {} DAGs from API (only_active: {}), total: {}", dag_list.dags.len(), only_active, total);
+                        debug!("Received {} DAGs from API, total: {}", dag_list.dags.len(), total);
                         let active_count = dag_list.dags.iter().filter(|d| !d.is_paused).count();
                         let paused_count = dag_list.dags.iter().filter(|d| d.is_paused).count();
                         debug!("  Active: {}, Paused: {}", active_count, paused_count);
@@ -223,7 +225,7 @@ impl Worker {
                                 crate::app::model::dags::LoadingStatus::Complete
                             };
                             
-                            // Sync panel data from environment state
+                            // Sync panel data from environment state (hard refresh - replaces frontend)
                             app.sync_panel_data();
                             
                             (needs_more, dag_list.dags.len())
@@ -233,26 +235,16 @@ impl Worker {
                         if needs_more {
                             debug!("Auto-triggering next batch after initial load: offset={}, total={}", current_count, total);
                             let _ = self.tx.send(WorkerMessage::FetchMoreDags {
-                                only_active,
                                 offset: current_count as i64,
                                 limit: 10, // Same batch size as initial load
                             }).await;
                         }
                         
-                        // Spawn stats and recent runs fetching in background - don't block next DAG batch
+                        // Spawn recent runs fetching in background - don't block next DAG batch
                         if !unpaused_dag_ids.is_empty() {
                             let app_clone = self.app.clone();
                             let client_clone = client.clone();
                             tokio::spawn(async move {
-                                // Fetch DAG stats (single API call for batch)
-                                let dag_ids_str: Vec<&str> = unpaused_dag_ids.iter().map(|s| s.as_str()).collect();
-                                if let Ok(dag_stats) = client_clone.get_dag_stats(dag_ids_str).await {
-                                    let mut app = app_clone.lock().unwrap();
-                                    for dag_stats in dag_stats.dags {
-                                        app.dags.dag_stats.insert(dag_stats.dag_id, dag_stats.stats);
-                                    }
-                                }
-                                
                                 // Fetch recent runs using batch API with intelligent follow-up for missing DAGs
                                 let mut all_runs: std::collections::HashMap<String, Vec<_>> = std::collections::HashMap::new();
                                 let mut remaining_dag_ids = unpaused_dag_ids.clone();
@@ -323,9 +315,13 @@ impl Worker {
                                 debug!("[UpdateDags] Stored {} DAGs with runs, {} without runs, recent_runs now has {} total entries", 
                                     stored_with_runs, stored_without_runs, app.dags.recent_runs.len());
                                 
-                                // Trigger UI refresh now that runs are available
-                                app.sync_panel_data();
-                                debug!("[UpdateDags] Synced panel data after storing runs");
+                                // Trigger UI refresh now that runs are available (only if on DAG panel)
+                                if app.active_panel == crate::app::state::Panel::Dag {
+                                    app.sync_panel_data();
+                                    debug!("[UpdateDags] Synced panel data after storing runs");
+                                } else {
+                                    debug!("[UpdateDags] Skipping sync - user switched to different panel");
+                                }
                             });
                         }
                         
@@ -347,10 +343,10 @@ impl Worker {
                     }
                 }
             }
-            WorkerMessage::FetchMoreDags { only_active, offset, limit } => {
+            WorkerMessage::FetchMoreDags { offset, limit } => {
                 let start = std::time::Instant::now();
                 debug!("[PERF] FetchMoreDags: offset={}, limit={}", offset, limit);
-                let dag_list = client.list_dags_paginated(offset, limit, only_active).await;
+                let dag_list = client.list_dags_paginated(offset, limit).await;
                 debug!("[PERF] FetchMoreDags: list_dags_paginated took {:?}", start.elapsed());
                 match dag_list {
                     Ok(dag_list) => {
@@ -400,26 +396,16 @@ impl Worker {
                         if needs_more {
                             debug!("Auto-triggering next batch: offset={}, total={}", current_count, total);
                             let _ = self.tx.send(WorkerMessage::FetchMoreDags {
-                                only_active,
                                 offset: current_count as i64,
                                 limit,
                             }).await;
                         }
                         
-                        // Spawn stats and recent runs fetching in background - don't block next DAG batch
+                        // Spawn recent runs fetching in background - don't block next DAG batch
                         if !unpaused_dag_ids.is_empty() {
                             let app_clone = self.app.clone();
                             let client_clone = client.clone();
                             tokio::spawn(async move {
-                                // Fetch DAG stats (single API call for batch)
-                                let dag_ids_str: Vec<&str> = unpaused_dag_ids.iter().map(|s| s.as_str()).collect();
-                                if let Ok(dag_stats) = client_clone.get_dag_stats(dag_ids_str).await {
-                                    let mut app = app_clone.lock().unwrap();
-                                    for dag_stats in dag_stats.dags {
-                                        app.dags.dag_stats.insert(dag_stats.dag_id, dag_stats.stats);
-                                    }
-                                }
-                                
                                 // Fetch recent runs using batch API with intelligent follow-up for missing DAGs
                                 let mut all_runs: std::collections::HashMap<String, Vec<_>> = std::collections::HashMap::new();
                                 let mut remaining_dag_ids = unpaused_dag_ids.clone();
@@ -489,9 +475,13 @@ impl Worker {
                                 }
                                 debug!("[FetchMoreDags] Stored {} DAGs with runs, {} without runs", stored_with_runs, stored_without_runs);
                                 
-                                // Trigger UI refresh now that runs are available
-                                app.sync_panel_data();
-                                debug!("[FetchMoreDags] Synced panel data after storing runs");
+                                // Trigger UI refresh now that runs are available (only if on DAG panel)
+                                if app.active_panel == crate::app::state::Panel::Dag {
+                                    app.sync_panel_data();
+                                    debug!("[FetchMoreDags] Synced panel data after storing runs");
+                                } else {
+                                    debug!("[FetchMoreDags] Skipping sync - user switched to different panel");
+                                }
                             });
                         }
                     }
@@ -662,48 +652,7 @@ impl Worker {
                     }
                 }
             }
-            WorkerMessage::UpdateDagStats { clear } => {
-                let dag_ids = {
-                    let app = self.app.lock().unwrap();
-                    let dag_ids = app
-                        .environment_state
-                        .get_active_dags()
-                        .iter()
-                        .map(|dag| dag.dag_id.clone())
-                        .collect::<Vec<_>>();
-                    dag_ids
-                };
-                
-                // Skip if no DAGs are loaded yet (avoid 404 with empty dag_ids parameter)
-                if dag_ids.is_empty() {
-                    let mut app = self.app.lock().unwrap();
-                    if clear {
-                        app.dags.dag_stats = HashMap::default();
-                    }
-                    return Ok(());
-                }
-                
-                let dag_ids_str: Vec<&str> =
-                    dag_ids.iter().map(std::string::String::as_str).collect();
-                let dag_stats = client.get_dag_stats(dag_ids_str).await;
-                let mut app = self.app.lock().unwrap();
-                if clear {
-                    app.dags.dag_stats = HashMap::default();
-                }
-                match dag_stats {
-                    Ok(dag_stats) => {
-                        for dag_stats in dag_stats.dags {
-                            app.dags.dag_stats.insert(dag_stats.dag_id, dag_stats.stats);
-                        }
-                    }
-                    Err(e) => {
-                        // dagStats endpoint may not be available in all Airflow versions
-                        // Log the error but don't show popup to user
-                        log::warn!("Failed to fetch DAG stats (this is optional): {}", e);
-                        log::info!("DAG stats will not be available. This is normal for some Airflow versions.");
-                    }
-                }
-            }
+
             WorkerMessage::UpdateRecentDagRuns => {
                 // Fetch recent runs for DAG health indicators in the list view.
                 // Only fetches for unpaused DAGs to optimize bandwidth usage - paused DAGs

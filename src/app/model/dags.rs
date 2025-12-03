@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Row, StatefulWidget, Table, Widget};
 use time::OffsetDateTime;
 
-use crate::airflow::model::common::{Connection, Dag, DagRun, DagStatistic, ImportError, Variable};
+use crate::airflow::model::common::{Connection, Dag, DagRun, ImportError, Variable};
 use crate::app::events::custom::FlowrsEvent;
 use crate::app::model::popup::dags::commands::create_dag_command_popup;
 use crate::ui::common::{get_state_icon, hash_to_color, highlight_search_text};
@@ -146,7 +146,6 @@ pub struct DagModel {
     
     // DAG tab data
     pub all: Vec<Dag>,
-    pub dag_stats: HashMap<String, Vec<DagStatistic>>,
     pub recent_runs: HashMap<String, Vec<DagRun>>,  // Store recent runs for each DAG
     pub filtered: SortableTable<Dag>,
     pub filter: Filter,
@@ -192,7 +191,6 @@ impl DagModel {
             
             // DAG tab data
             all: vec![],
-            dag_stats: HashMap::new(),
             recent_runs: HashMap::new(),
             filtered: SortableTable::new(&["State", "Name", "Schedule", "Next Run", "Tags"], vec![], reserved),
             filter: Filter::new(),
@@ -544,11 +542,7 @@ impl Model for DagModel {
                         self.loading_status = LoadingStatus::LoadingInitial;
                         return (
                             Some(FlowrsEvent::Tick),
-                            vec![
-                                WorkerMessage::UpdateDags {
-                                    only_active: !self.show_paused,
-                                },
-                            ],
+                            vec![WorkerMessage::UpdateDags],
                         );
                     }
                     LoadingStatus::LoadingInitial => {
@@ -765,19 +759,10 @@ impl Model for DagModel {
                             }
                         }
                         KeyCode::Char('p') => {
-                            // Toggle showing paused DAGs
+                            // Toggle showing paused DAGs (frontend filter only)
                             self.show_paused = !self.show_paused;
                             self.filter_dags();
-                            // Refresh from API with new only_active filter
-                            return (
-                                None,
-                                vec![
-                                    WorkerMessage::UpdateDags {
-                                        only_active: !self.show_paused,
-                                    },
-                                    WorkerMessage::UpdateDagStats { clear: true },
-                                ],
-                            );
+                            // No WorkerMessage - purely frontend filtering!
                         }
                         KeyCode::Char('P') => {
                             // Pause/unpause the selected DAG (Shift+P)
@@ -936,11 +921,7 @@ impl Model for DagModel {
                                     self.loading_status = LoadingStatus::NotStarted;
                                     return (
                                         None,
-                                        vec![
-                                            WorkerMessage::UpdateDags {
-                                                only_active: !self.show_paused,
-                                            },
-                                        ],
+                                        vec![WorkerMessage::UpdateDags],
                                     );
                                 }
                                 DagPanelTab::Variables => {

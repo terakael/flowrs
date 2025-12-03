@@ -8,18 +8,19 @@ use crate::airflow::model::common::{Dag, DagList};
 pub trait DagOperations: Send + Sync {
     /// List all DAGs
     /// 
-    /// # Arguments
-    /// * `only_active` - If true, only return active (non-paused) DAGs
-    async fn list_dags(&self, only_active: bool) -> Result<DagList>;
+    /// Returns only DAGs with is_active=true (valid/schedulable DAGs).
+    /// Paused vs unpaused filtering happens in the UI layer.
+    async fn list_dags(&self) -> Result<DagList>;
 
     /// List DAGs with pagination support
+    /// 
+    /// Returns only DAGs with is_active=true (valid/schedulable DAGs).
+    /// Paused vs unpaused filtering happens in the UI layer.
     /// 
     /// # Arguments
     /// * `offset` - Number of DAGs to skip
     /// * `limit` - Maximum number of DAGs to return
-    /// * `only_active` - If true, only return DAGs with is_active=true (valid/schedulable DAGs)
-    ///   Note: This filters by is_active, not is_paused. Paused DAGs are filtered in the UI.
-    async fn list_dags_paginated(&self, offset: i64, limit: i64, only_active: bool) -> Result<DagList>;
+    async fn list_dags_paginated(&self, offset: i64, limit: i64) -> Result<DagList>;
 
     /// Toggle a DAG's paused state
     async fn toggle_dag(&self, dag_id: &str, is_paused: bool) -> Result<()>;
