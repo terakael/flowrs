@@ -504,15 +504,16 @@ impl Default for EnvironmentStateContainer {
 }
 
 // ============================================================================
-// Log Persistence Functions
+// Cache Persistence - Common Helpers
 // ============================================================================
 
-/// Get the cache directory for flowrs logs
-pub fn get_logs_cache_dir() -> Result<PathBuf> {
+/// Get a cache subdirectory under ~/.cache/flowrs/
+/// Creates the directory if it doesn't exist
+fn get_cache_subdir(subdir: &str) -> Result<PathBuf> {
     let cache_dir = dirs::cache_dir()
         .ok_or_else(|| anyhow::anyhow!("Could not determine cache directory"))?
         .join("flowrs")
-        .join("logs");
+        .join(subdir);
     
     fs::create_dir_all(&cache_dir)?;
     Ok(cache_dir)
@@ -521,6 +522,48 @@ pub fn get_logs_cache_dir() -> Result<PathBuf> {
 /// Sanitize a string for use in filenames by replacing problematic characters
 fn sanitize_filename(s: &str) -> String {
     s.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_")
+}
+
+/// Write content to a file with optional read-only permissions
+/// Handles existing read-only files by making them writable before removal
+fn write_cached_file(filepath: &Path, content: &str, read_only: bool) -> Result<()> {
+    // If file exists and might be read-only, remove it first
+    if filepath.exists() {
+        #[cfg(unix)]
+        if read_only {
+            use std::fs::Permissions;
+            use std::os::unix::fs::PermissionsExt;
+            
+            // Make writable before removing (in case it's read-only)
+            let writable_permissions = Permissions::from_mode(0o644);
+            let _ = fs::set_permissions(filepath, writable_permissions);
+        }
+        fs::remove_file(filepath)?;
+    }
+    
+    // Write content to file
+    fs::write(filepath, content)?;
+    
+    // Set permissions if requested
+    #[cfg(unix)]
+    if read_only {
+        use std::fs::Permissions;
+        use std::os::unix::fs::PermissionsExt;
+        
+        let permissions = Permissions::from_mode(0o444);
+        fs::set_permissions(filepath, permissions)?;
+    }
+    
+    Ok(())
+}
+
+// ============================================================================
+// Logs Persistence
+// ============================================================================
+
+/// Get the cache directory for flowrs logs
+pub fn get_logs_cache_dir() -> Result<PathBuf> {
+    get_cache_subdir("logs")
 }
 
 /// Get filepath for a specific task log
@@ -563,11 +606,48 @@ pub fn save_log_to_disk(filepath: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
-/// Clean old log files from cache (older than days_to_keep)
-pub fn cleanup_old_logs(days_to_keep: u64) -> Result<usize> {
+// ============================================================================
+// DAG Code Persistence
+// ============================================================================
+
+/// Get the cache directory for flowrs DAG code files
+pub fn get_dag_code_cache_dir() -> Result<PathBuf> {
+    get_cache_subdir("dag_code")
+}
+
+/// Get filepath for a specific DAG's code
+/// Creates directory structure if it doesn't exist
+/// Returns path: ~/.cache/flowrs/dag_code/{env_name}/{dag_id}.py
+pub fn get_dag_code_filepath(env_name: &str, dag_id: &str) -> Result<PathBuf> {
+    let cache_dir = get_dag_code_cache_dir()?;
+    
+    // Sanitize path components to prevent directory traversal
+    let safe_env = sanitize_filename(env_name);
+    let safe_dag_id = sanitize_filename(dag_id);
+    
+    let dir = cache_dir.join(safe_env);
+    fs::create_dir_all(&dir)?;
+    
+    Ok(dir.join(format!("{}.py", safe_dag_id)))
+}
+
+/// Save DAG code to disk as a read-only Python file
+/// Sets file permissions to 0o444 (r--r--r--) to prevent accidental modifications
+pub fn save_dag_code_to_disk(filepath: &Path, content: &str) -> Result<()> {
+    write_cached_file(filepath, content, true)?;
+    log::debug!("Saved DAG code to disk (read-only): {}", filepath.display());
+    Ok(())
+}
+
+/// Generic cleanup function for cached files
+fn cleanup_old_cache_files(
+    cache_name: &str,
+    days_to_keep: u64,
+    get_cache_dir: fn() -> Result<PathBuf>
+) -> Result<usize> {
     use std::time::{SystemTime, Duration};
     
-    let cache_dir = match get_logs_cache_dir() {
+    let cache_dir = match get_cache_dir() {
         Ok(dir) => dir,
         Err(_) => return Ok(0), // Cache dir doesn't exist yet, nothing to clean
     };
@@ -602,9 +682,17 @@ pub fn cleanup_old_logs(days_to_keep: u64) -> Result<usize> {
                 if let Ok(metadata) = entry.metadata() {
                     if let Ok(modified) = metadata.modified() {
                         if modified < cutoff {
+                            // Handle read-only files
+                            #[cfg(unix)]
+                            {
+                                use std::fs::Permissions;
+                                use std::os::unix::fs::PermissionsExt;
+                                let _ = fs::set_permissions(&path, Permissions::from_mode(0o644));
+                            }
+                            
                             fs::remove_file(&path)?;
                             *deleted += 1;
-                            log::debug!("Deleted old log file: {}", path.display());
+                            log::debug!("Deleted old cache file: {}", path.display());
                         }
                     }
                 }
@@ -617,8 +705,18 @@ pub fn cleanup_old_logs(days_to_keep: u64) -> Result<usize> {
     cleanup_dir(&cache_dir, cutoff, &mut deleted_count)?;
     
     if deleted_count > 0 {
-        log::info!("Cleaned up {} old log files from cache", deleted_count);
+        log::info!("Cleaned up {} old {} files from cache", deleted_count, cache_name);
     }
     
     Ok(deleted_count)
+}
+
+/// Clean old DAG code files from cache (older than days_to_keep)
+pub fn cleanup_old_dag_code(days_to_keep: u64) -> Result<usize> {
+    cleanup_old_cache_files("dag_code", days_to_keep, get_dag_code_cache_dir)
+}
+
+/// Clean old log files from cache (older than days_to_keep)
+pub fn cleanup_old_logs(days_to_keep: u64) -> Result<usize> {
+    cleanup_old_cache_files("log", days_to_keep, get_logs_cache_dir)
 }

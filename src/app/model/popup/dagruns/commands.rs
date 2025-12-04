@@ -12,7 +12,12 @@ pub static DAGRUN_COMMANDS: LazyLock<Vec<Command<'static>>> = LazyLock::new(|| {
         Command {
             name: "Show",
             key_binding: "v",
-            description: "Show DAG code",
+            description: "Show DAG code (press 'e' in viewer to open in editor)",
+        },
+        Command {
+            name: "Open in Editor",
+            key_binding: "e",
+            description: "Open DAG code directly in editor",
         },
         Command {
             name: "Mark",

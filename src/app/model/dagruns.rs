@@ -42,19 +42,56 @@ pub struct DagCodeWidget {
     pub cached_lines: Option<Vec<Line<'static>>>,
     pub vertical_scroll: usize,
     pub vertical_scroll_state: ScrollbarState,
+    pub file_path: Option<std::path::PathBuf>,
+    // Flag to open in editor on next tick
+    // This is necessary because the worker can't send OpenInEditor messages directly
+    // to the main loop (they'd go back to the worker's own channel), so we use this
+    // flag as a communication mechanism between worker and model update cycle
+    pub pending_editor_open: bool,
 }
 
 impl DagCodeWidget {
-    pub fn set_code(&mut self, code: &str) {
+    pub fn set_code(&mut self, code: &str, dag_id: &str, env_name: &str) {
+        use crate::app::environment_state::{get_dag_code_filepath, save_dag_code_to_disk};
+        
+        log::info!("Setting DAG code for dag_id={}, env_name={}", dag_id, env_name);
+        
+        // Generate syntax-highlighted lines for display
         self.cached_lines = Some(code_to_lines(code));
         self.vertical_scroll = 0;
         self.vertical_scroll_state = ScrollbarState::default();
+        
+        // Persist to disk for editor access
+        match get_dag_code_filepath(env_name, dag_id) {
+            Ok(filepath) => {
+                log::debug!("Got DAG code filepath: {}", filepath.display());
+                match save_dag_code_to_disk(&filepath, code) {
+                    Ok(()) => {
+                        self.file_path = Some(filepath.clone());
+                        log::info!("DAG code persisted successfully to: {}", filepath.display());
+                    }
+                    Err(e) => {
+                        log::error!("Failed to save DAG code to disk: {}", e);
+                        self.file_path = None;
+                    }
+                }
+            }
+            Err(e) => {
+                log::error!("Failed to get DAG code filepath: {}", e);
+                self.file_path = None;
+            }
+        }
+    }
+
+    pub fn get_file_path(&self) -> Option<&std::path::Path> {
+        self.file_path.as_deref()
     }
 
     pub fn clear(&mut self) {
         self.cached_lines = None;
         self.vertical_scroll = 0;
         self.vertical_scroll_state = ScrollbarState::default();
+        // Don't clear file_path - we want to keep it cached for direct 'e' key access
     }
 }
 
@@ -322,6 +359,23 @@ impl Model for DagRunModel {
         match event {
             FlowrsEvent::Tick => {
                 self.ticks += 1;
+                
+                // Check if we need to open DAG code in editor
+                if self.dag_code.pending_editor_open {
+                    let filepath = self.dag_code.get_file_path().map(|p| p.to_path_buf());
+                    self.dag_code.pending_editor_open = false;
+                    
+                    if let Some(filepath) = filepath {
+                        log::info!("Opening DAG code in editor (pending flag was set): {}", filepath.display());
+                        return (
+                            Some(FlowrsEvent::Tick),
+                            vec![WorkerMessage::OpenInEditor { filepath }],
+                        );
+                    } else {
+                        log::warn!("pending_editor_open flag was set but file_path is None");
+                    }
+                }
+                
                 // No automatic refresh - use 'r' key to refresh manually
                 return (Some(FlowrsEvent::Tick), vec![]);
             }
@@ -397,11 +451,35 @@ impl Model for DagRunModel {
                     }
                     
                     match key_event.code {
-                        KeyCode::Esc | KeyCode::Char('q' | 'v') | KeyCode::Enter => {
+                        KeyCode::Char('e') => {
+                            // Open DAG code in external editor
+                            log::info!("User pressed 'e' to open DAG code in editor");
+                            log::debug!("DAG code file_path: {:?}", self.dag_code.file_path);
+                            if let Some(filepath) = self.dag_code.get_file_path() {
+                                log::info!("Opening DAG code in editor: {}", filepath.display());
+                                return (
+                                    None,
+                                    vec![WorkerMessage::OpenInEditor {
+                                        filepath: filepath.to_path_buf(),
+                                    }],
+                                );
+                            } else {
+                                log::warn!("DAG code file path not set, showing error popup");
+                                self.error_popup = Some(ErrorPopup::from_strings(vec![
+                                    "DAG code file not found on disk".into(),
+                                    "Try closing and reopening the DAG code view".into(),
+                                ]));
+                                return (None, vec![]);
+                            }
+                        }
+                        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
                             self.dag_code.clear();
                             return (None, vec![]);
                         }
-                        _ => {}
+                        _ => {
+                            // Consume all other keys to prevent fall-through to table sorting
+                            return (None, vec![]);
+                        }
                     }
                 } else {
                     // Handle scrolling based on focused section
@@ -595,6 +673,32 @@ impl Model for DagRunModel {
                                 return (
                                     None,
                                     vec![WorkerMessage::GetDagCode {
+                                        dag_id: dag_id.clone(),
+                                    }],
+                                );
+                            }
+                        }
+                        KeyCode::Char('e') => {
+                            // Open DAG code directly in editor
+                            if let Some(dag_id) = &self.dag_id {
+                                // Check if we have a cached file path and if the file exists
+                                if let Some(filepath) = self.dag_code.get_file_path() {
+                                    if filepath.exists() {
+                                        log::info!("Opening cached DAG code file in editor: {}", filepath.display());
+                                        return (
+                                            None,
+                                            vec![WorkerMessage::OpenInEditor {
+                                                filepath: filepath.to_path_buf(),
+                                            }],
+                                        );
+                                    }
+                                }
+                                
+                                // File not cached or doesn't exist, fetch and open
+                                log::info!("DAG code not cached, fetching for dag_id={}", dag_id);
+                                return (
+                                    None,
+                                    vec![WorkerMessage::FetchAndOpenDagCodeInEditor {
                                         dag_id: dag_id.clone(),
                                     }],
                                 );
@@ -795,12 +899,13 @@ impl Widget for &mut DagRunModel {
         StatefulWidget::render(t, dagruns_area, buf, &mut self.filtered.state);
 
         if let Some(cached_lines) = &self.dag_code.cached_lines {
-            let area = popup_area(area, 60, 90);
+            let area = popup_area(area, 80, 95);
 
             let popup = Block::default()
                 .border_type(BorderType::Rounded)
                 .borders(Borders::ALL)
-                .title("DAG Code")
+                .title("DAG Code (Read-Only)")
+                .title_bottom("[e] Open in editor  [j/k] Scroll  [q/ESC] Close")
                 .border_style(DEFAULT_STYLE)
                 .style(DEFAULT_STYLE)
                 .title_style(DEFAULT_STYLE.add_modifier(Modifier::BOLD));
@@ -809,7 +914,7 @@ impl Widget for &mut DagRunModel {
             let code_text = Paragraph::new(cached_lines.clone())
                 .block(popup)
                 .style(DEFAULT_STYLE)
-                .wrap(Wrap { trim: true })
+                .wrap(Wrap { trim: false })
                 .scroll((self.dag_code.vertical_scroll as u16, 0));
 
             Clear.render(area, buf); //this clears out the background
@@ -917,8 +1022,11 @@ fn code_to_lines(dag_code: &str) -> Vec<Line<'static>> {
             .into_iter()
             .filter_map(|segment| into_span(segment).ok())
             .map(|span: Span| {
-                // Convert borrowed span to owned span
-                Span::styled(span.content.to_string(), span.style)
+                // Convert borrowed span to owned span and strip background color
+                // Background colors from the syntax theme conflict with terminal's background
+                let mut style = span.style;
+                style.bg = None;
+                Span::styled(span.content.to_string(), style)
             })
             .collect();
         lines.push(Line::from(line_spans));

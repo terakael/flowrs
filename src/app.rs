@@ -27,10 +27,13 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: Arc<Mutex<App>
 
     let (tx_worker, rx_worker) = tokio::sync::mpsc::channel::<WorkerMessage>(100);
 
-    // Clean up old log files from cache (older than 7 days)
-    log::info!("Cleaning up old log files from cache");
+    // Clean up old cached files (logs older than 7 days, DAG code older than 30 days)
+    log::info!("Cleaning up old cached files");
     if let Err(e) = environment_state::cleanup_old_logs(7) {
         log::warn!("Failed to cleanup old logs: {}", e);
+    }
+    if let Err(e) = environment_state::cleanup_old_dag_code(30) {
+        log::warn!("Failed to cleanup old DAG code files: {}", e);
     }
 
     log::info!("Initializing environment state");
@@ -93,6 +96,8 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: Arc<Mutex<App>
                         WorkerMessage::UpdateDagRuns { dag_id, clear } => {
                             if *clear {
                                 app.dagruns.dag_id = Some(dag_id.clone());
+                                // Clear DAG code cache when switching DAGs
+                                app.dagruns.dag_code = Default::default();
                                 // Sync cached data immediately
                                 app.dagruns.all = app.environment_state.get_active_dag_runs(dag_id);
                                 app.dagruns.filter_dag_runs();

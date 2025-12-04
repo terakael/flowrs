@@ -49,6 +49,9 @@ pub enum WorkerMessage {
     GetDagCode {
         dag_id: String,
     },
+    FetchAndOpenDagCodeInEditor {
+        dag_id: String,
+    },
     GetDagDetails {
         dag_id: String,
     },
@@ -682,9 +685,11 @@ impl Worker {
             }
             WorkerMessage::GetDagCode { dag_id } => {
                 let current_dag: Option<Dag>;
+                let env_name: Option<String>;
                 {
                     let app = self.app.lock().unwrap();
                     current_dag = app.environment_state.get_active_dag(&dag_id);
+                    env_name = app.environment_state.get_active_environment_name().map(|s| s.to_string());
                 }
 
                 if let Some(current_dag) = current_dag {
@@ -692,7 +697,12 @@ impl Worker {
                     let mut app = self.app.lock().unwrap();
                     match dag_code {
                         Ok(dag_code) => {
-                            app.dagruns.dag_code.set_code(&dag_code);
+                            if let Some(env) = env_name {
+                                app.dagruns.dag_code.set_code(&dag_code, &dag_id, &env);
+                            } else {
+                                // Fallback: use "default" if no environment name available
+                                app.dagruns.dag_code.set_code(&dag_code, &dag_id, "default");
+                            }
                         }
                         Err(e) => {
                             app.dags.error_popup =
@@ -704,6 +714,71 @@ impl Worker {
                     app.dags.error_popup =
                         Some(ErrorPopup::from_strings(vec!["DAG not found".to_string()]));
                 }
+            }
+            WorkerMessage::FetchAndOpenDagCodeInEditor { dag_id } => {
+                // Fetch DAG code and open in editor WITHOUT showing the popup
+                use crate::app::environment_state::{get_dag_code_filepath, save_dag_code_to_disk};
+                
+                let (current_dag, env_name) = {
+                    let app = self.app.lock().unwrap();
+                    (
+                        app.environment_state.get_active_dag(&dag_id),
+                        app.environment_state.get_active_environment_name().map(|s| s.to_string())
+                    )
+                };
+
+                // Check if DAG exists
+                let Some(current_dag) = current_dag else {
+                    let mut app = self.app.lock().unwrap();
+                    app.dagruns.error_popup = Some(ErrorPopup::from_strings(vec!["DAG not found".into()]));
+                    return Ok(());
+                };
+
+                // Fetch DAG code from API
+                let dag_code = match client.get_dag_code(&current_dag).await {
+                    Ok(code) => code,
+                    Err(e) => {
+                        log::error!("Failed to fetch DAG code: {}", e);
+                        let mut app = self.app.lock().unwrap();
+                        app.dagruns.error_popup = Some(ErrorPopup::from_strings(vec![
+                            "Failed to fetch DAG code".into(),
+                            e.to_string(),
+                        ]));
+                        return Ok(());
+                    }
+                };
+
+                let env = env_name.as_deref().unwrap_or("default");
+                
+                // Get filepath and save to disk
+                let filepath = match get_dag_code_filepath(env, &dag_id) {
+                    Ok(path) => path,
+                    Err(e) => {
+                        log::error!("Failed to get DAG code filepath: {}", e);
+                        let mut app = self.app.lock().unwrap();
+                        app.dagruns.error_popup = Some(ErrorPopup::from_strings(vec![
+                            "Failed to get file path for DAG code".into(),
+                            e.to_string(),
+                        ]));
+                        return Ok(());
+                    }
+                };
+
+                if let Err(e) = save_dag_code_to_disk(&filepath, &dag_code) {
+                    log::error!("Failed to save DAG code to disk: {}", e);
+                    let mut app = self.app.lock().unwrap();
+                    app.dagruns.error_popup = Some(ErrorPopup::from_strings(vec![
+                        "Failed to save DAG code to disk".into(),
+                        e.to_string(),
+                    ]));
+                    return Ok(());
+                }
+
+                // Success - update file_path and set pending_editor_open flag
+                log::info!("DAG code saved to disk, setting flag to open in editor: {}", filepath.display());
+                let mut app = self.app.lock().unwrap();
+                app.dagruns.dag_code.file_path = Some(filepath);
+                app.dagruns.dag_code.pending_editor_open = true;
             }
             WorkerMessage::GetDagDetails { dag_id } => {
                 match client.get_dag_details(&dag_id).await {
