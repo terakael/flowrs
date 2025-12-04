@@ -21,13 +21,12 @@ use super::{filter::Filter, handle_command_popup_events, Model, HALF_PAGE_SIZE};
 impl CustomSort for AirflowConfig {
     fn column_value(&self, column_index: usize) -> String {
         match column_index {
-            0 => self.name.clone(),
-            1 => self.endpoint.clone(),
-            2 => self.managed.as_ref().map(|m| m.to_string()).unwrap_or_else(|| "None".to_string()),
-            3 => match self.version {
+            0 => match self.version {
                 crate::airflow::config::AirflowVersion::V2 => "v2".to_string(),
                 crate::airflow::config::AirflowVersion::V3 => "v3".to_string(),
             },
+            1 => self.name.clone(),
+            2 => self.endpoint.clone(),
             _ => String::new(),
         }
     }
@@ -43,7 +42,7 @@ pub struct ConfigModel {
 
 impl ConfigModel {
     pub fn new(configs: Vec<AirflowConfig>) -> Self {
-        let headers = ["Name", "Endpoint", "Managed", "Version"];
+        let headers = ["Version", "Name", "Endpoint"];
         // Reserved keys: j/k (scroll), o (open), ? (help), / (filter), q (quit)
         let reserved = &['j', 'k', 'o', '?', '/', 'q'];
         ConfigModel {
@@ -62,7 +61,7 @@ impl ConfigModel {
             Some(ErrorPopup::from_strings(errors))
         };
 
-        let headers = ["Name", "Endpoint", "Managed", "Version"];
+        let headers = ["Version", "Name", "Endpoint"];
         let reserved = &['j', 'k', 'o', '?', '/', 'q'];
         ConfigModel {
             all: configs.clone(),
@@ -212,17 +211,12 @@ impl Widget for &mut ConfigModel {
 
         let rows = self.filtered.items.iter().enumerate().map(|(idx, item)| {
             Row::new(vec![
-                Line::from(item.name.as_str()),
-                Line::from(item.endpoint.as_str()),
-                Line::from(if let Some(managed_service) = &item.managed {
-                    managed_service.to_string()
-                } else {
-                    "None".to_string()
-                }),
                 Line::from(match item.version {
                     crate::airflow::config::AirflowVersion::V2 => "v2",
                     crate::airflow::config::AirflowVersion::V3 => "v3",
                 }),
+                Line::from(item.name.as_str()),
+                Line::from(item.endpoint.as_str()),
             ])
             .style(if (idx % 2) == 0 {
                 DEFAULT_STYLE
@@ -234,10 +228,9 @@ impl Widget for &mut ConfigModel {
         let t = Table::new(
             rows,
             &[
-                Constraint::Percentage(20),
-                Constraint::Percentage(55),
-                Constraint::Percentage(15),
                 Constraint::Min(8),
+                Constraint::Percentage(20),
+                Constraint::Percentage(70),
             ],
         )
         .header(header)
@@ -245,7 +238,7 @@ impl Widget for &mut ConfigModel {
             Block::default()
                 .border_type(BorderType::Rounded)
                 .borders(Borders::ALL)
-                .title("Config"),
+                .title("Environment"),
         )
         .style(DEFAULT_STYLE)
         .row_highlight_style(selected_style);
