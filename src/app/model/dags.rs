@@ -2,11 +2,13 @@ use std::collections::HashMap;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use log::debug;
+use once_cell::sync::Lazy;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Flex, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Row, StatefulWidget, Table, Widget};
+use regex::Regex;
 use time::OffsetDateTime;
 
 use crate::airflow::model::common::{Connection, Dag, DagRun, ImportError, Variable};
@@ -27,6 +29,20 @@ use std::cmp::Ordering;
 pub const RECENT_RUNS_HEALTH_WINDOW: usize = 7;
 /// Width of the state column (for colored square indicator)
 const STATE_COLUMN_WIDTH: u16 = 5;
+
+// Constants for schedule frequency calculations (in seconds)
+const SECONDS_PER_MINUTE: u64 = 60;
+const SECONDS_PER_HOUR: u64 = 3_600;
+const SECONDS_PER_DAY: u64 = 86_400;
+const SECONDS_PER_WEEK: u64 = 604_800;
+const SECONDS_PER_MONTH: u64 = 2_592_000;  // ~30 days (approximate)
+const SECONDS_PER_YEAR: u64 = 31_536_000;  // 365 days (approximate)
+const UNKNOWN_SCHEDULE_FREQUENCY: u64 = 999_999;  // Fallback for unparseable schedules
+
+// Lazy-initialized regex pattern for parsing "every X unit" schedule descriptions
+static SCHEDULE_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"every\s+(\d+)\s+(minute|hour|day|week|month|year)s?").expect("Invalid regex pattern")
+});
 
 // State priority constants for sorting (lower = higher urgency)
 const PRIORITY_FAILED: u8 = 0;      // Failed - requires immediate attention
@@ -60,7 +76,7 @@ impl CustomSort for Dag {
             0 => if self.is_paused { "paused" } else { "active" }.to_string(), // State
             1 => self.dag_id.clone(), // Name
             2 => self.timetable_description.clone().unwrap_or_default(), // Schedule
-            3 => self.next_dagrun_logical_date.map(|d| d.to_string()).unwrap_or_default(), // Next Run
+            3 => self.next_dagrun_create_after.map(|d| d.to_string()).unwrap_or_default(), // Next Run
             4 => self.tags.first().map(|t| t.name.clone()).unwrap_or_default(), // Tags
             _ => String::new(),
         }
@@ -74,9 +90,15 @@ impl CustomSort for Dag {
                 let priority_b = b.computed_state_priority.unwrap_or(255);
                 priority_a.cmp(&priority_b)
             }),
+            2 => Some(|a: &Dag, b: &Dag| {
+                // Sort by schedule frequency (lower value = more frequent)
+                let freq_a = a.computed_schedule_frequency.unwrap_or(u64::MAX);
+                let freq_b = b.computed_schedule_frequency.unwrap_or(u64::MAX);
+                freq_a.cmp(&freq_b)
+            }),
             3 => Some(|a: &Dag, b: &Dag| {
                 // Sort by next run time - soonest runs first (ascending)
-                match (&a.next_dagrun_logical_date, &b.next_dagrun_logical_date) {
+                match (&a.next_dagrun_create_after, &b.next_dagrun_create_after) {
                     (Some(date_a), Some(date_b)) => date_a.cmp(date_b),
                     (Some(_), None) => Ordering::Less,  // DAGs with next run come first
                     (None, Some(_)) => Ordering::Greater,  // DAGs without next run come last
@@ -246,9 +268,10 @@ impl DagModel {
             filtered_dags.retain(|dag| !dag.is_paused);
         }
         
-        // Step 3: Compute state priority for each DAG (for sorting)
+        // Step 3: Compute state priority and schedule frequency for each DAG (for sorting)
         for dag in &mut filtered_dags {
             dag.computed_state_priority = Some(self.compute_state_priority(dag));
+            dag.computed_schedule_frequency = Some(Self::compute_schedule_frequency(dag));
         }
         
         // Step 4: Sort - Alphabetically by DAG name (paused and unpaused interleaved)
@@ -515,6 +538,31 @@ impl DagModel {
         }
         
         PRIORITY_UNKNOWN
+    }
+    
+    /// Compute schedule frequency for sorting
+    /// Returns frequency in seconds (lower = more frequent)
+    fn compute_schedule_frequency(dag: &Dag) -> u64 {
+        // Try structured schedule_interval first (V1 API)
+        if let Some(interval) = &dag.schedule_interval {
+            if let Some(obj) = interval.as_object() {
+                if let Some(type_str) = obj.get("__type").and_then(|v| v.as_str()) {
+                    match type_str {
+                        "TimeDelta" => return calculate_timedelta_frequency(obj),
+                        "RelativeDelta" => return calculate_relativedelta_frequency(obj),
+                        "CronExpression" => {
+                            // For cron expressions, fall through to text parsing
+                            // We could extract the value field and parse it, but for now
+                            // let's rely on timetable_description which should have a human-readable version
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        
+        // Fall back to parsing timetable_description
+        parse_timetable_description(dag.timetable_description.as_deref())
     }
 }
 
@@ -1350,6 +1398,174 @@ fn convert_datetimeoffset_to_human_readable_remaining_time(dt: OffsetDateTime) -
     }
 }
 
+/// Calculate frequency in seconds from TimeDelta schedule_interval
+///
+/// # Arguments
+/// * `obj` - JSON object containing "days" and "seconds" fields
+///
+/// # Returns
+/// * Frequency in seconds between runs
+/// * `u64::MAX` if the interval is invalid, negative, or represents "never"
+///
+/// # Examples
+/// * `{"days": 1, "seconds": 0}` → 86400 (daily)
+/// * `{"days": 0, "seconds": 3600}` → 3600 (hourly)
+fn calculate_timedelta_frequency(obj: &serde_json::Map<String, serde_json::Value>) -> u64 {
+    let days = obj.get("days").and_then(|v| v.as_i64()).unwrap_or(0);
+    let seconds = obj.get("seconds").and_then(|v| v.as_i64()).unwrap_or(0);
+    // microseconds are too small to matter for scheduling frequency sorting
+    
+    // Convert to total seconds (ensure non-negative)
+    let total_seconds = (days * SECONDS_PER_DAY as i64) + seconds;
+    if total_seconds <= 0 {
+        debug!("Invalid TimeDelta interval: days={}, seconds={}, total={}", days, seconds, total_seconds);
+        u64::MAX  // Invalid or negative interval, treat as "never"
+    } else {
+        total_seconds as u64
+    }
+}
+
+/// Calculate frequency in seconds from RelativeDelta schedule_interval
+///
+/// # Arguments
+/// * `obj` - JSON object containing "years", "months", "days", "hours", "minutes", "seconds" fields
+///
+/// # Returns
+/// * Frequency in seconds between runs (approximate for months/years)
+/// * `u64::MAX` if the interval is invalid, negative, or represents "never"
+///
+/// # Note
+/// Months are approximated as 30 days, years as 365 days
+fn calculate_relativedelta_frequency(obj: &serde_json::Map<String, serde_json::Value>) -> u64 {
+    let years = obj.get("years").and_then(|v| v.as_i64()).unwrap_or(0);
+    let months = obj.get("months").and_then(|v| v.as_i64()).unwrap_or(0);
+    let days = obj.get("days").and_then(|v| v.as_i64()).unwrap_or(0);
+    let hours = obj.get("hours").and_then(|v| v.as_i64()).unwrap_or(0);
+    let minutes = obj.get("minutes").and_then(|v| v.as_i64()).unwrap_or(0);
+    let seconds = obj.get("seconds").and_then(|v| v.as_i64()).unwrap_or(0);
+    
+    // Approximate seconds (using average month/year lengths)
+    let total_seconds = (years * SECONDS_PER_YEAR as i64)
+        + (months * SECONDS_PER_MONTH as i64)
+        + (days * SECONDS_PER_DAY as i64)
+        + (hours * SECONDS_PER_HOUR as i64)
+        + (minutes * SECONDS_PER_MINUTE as i64)
+        + seconds;
+    
+    if total_seconds <= 0 {
+        debug!("Invalid RelativeDelta interval: years={}, months={}, days={}, hours={}, minutes={}, seconds={}, total={}", 
+               years, months, days, hours, minutes, seconds, total_seconds);
+        u64::MAX  // Invalid or negative interval, treat as "never"
+    } else {
+        total_seconds as u64
+    }
+}
+
+/// Parse timetable_description text to estimate frequency in seconds
+///
+/// This is a fallback when structured schedule_interval is not available (e.g., V2 API).
+/// Uses pattern matching and keyword detection to estimate schedule frequency.
+///
+/// # Arguments
+/// * `description` - Optional timetable description string
+///
+/// # Returns
+/// * Estimated frequency in seconds between runs
+/// * `u64::MAX` for "never" or missing descriptions
+/// * `UNKNOWN_SCHEDULE_FREQUENCY` for unparseable schedules
+fn parse_timetable_description(description: Option<&str>) -> u64 {
+    let desc = match description {
+        Some(d) if !d.is_empty() => d.to_lowercase(),
+        _ => {
+            debug!("No timetable description provided, treating as 'never'");
+            return u64::MAX;
+        }
+    };
+    
+    // Special cases - never scheduled or manual-only
+    if desc.contains("never") || desc == "none" {
+        return u64::MAX;
+    }
+    
+    // Try to extract numeric patterns like "Every X minutes/hours/days"
+    // Pattern: "every X minute(s)" or "every X hour(s)" etc.
+    if let Some(captures) = SCHEDULE_PATTERN.captures(&desc) {
+        if let Some(num_str) = captures.get(1) {
+            if let Ok(num) = num_str.as_str().parse::<u64>() {
+                let unit = captures.get(2).map(|m| m.as_str()).unwrap_or("");
+                return match unit {
+                    "minute" => num * SECONDS_PER_MINUTE,
+                    "hour" => num * SECONDS_PER_HOUR,
+                    "day" => num * SECONDS_PER_DAY,
+                    "week" => num * SECONDS_PER_WEEK,
+                    "month" => num * SECONDS_PER_MONTH,
+                    "year" => num * SECONDS_PER_YEAR,
+                    _ => {
+                        debug!("Unrecognized time unit '{}' in description: {}", unit, desc);
+                        u64::MAX
+                    }
+                };
+            }
+        }
+    }
+    
+    // Common frequency keywords - use exact matching or specific patterns to avoid false positives
+    // Check for "hourly" or "every hour" patterns
+    if desc == "hourly" || desc == "every hour" || (desc.contains("every") && desc.contains("hour") && !desc.contains("day")) {
+        return SECONDS_PER_HOUR;
+    }
+    
+    // Check for "daily" or "at HH:MM" patterns (without day-of-week indicators)
+    if desc == "daily" {
+        return SECONDS_PER_DAY;
+    }
+    
+    // "At HH:MM" typically means daily, but make sure it's not weekly (contains day names)
+    if desc.starts_with("at ") && 
+       !desc.contains("monday") && !desc.contains("tuesday") && !desc.contains("wednesday") &&
+       !desc.contains("thursday") && !desc.contains("friday") && !desc.contains("saturday") && !desc.contains("sunday") {
+        return SECONDS_PER_DAY;
+    }
+    
+    // Check for weekly patterns
+    if desc == "weekly" || 
+       desc.contains("monday") || desc.contains("tuesday") || desc.contains("wednesday") ||
+       desc.contains("thursday") || desc.contains("friday") || desc.contains("saturday") || desc.contains("sunday") {
+        return SECONDS_PER_WEEK;
+    }
+    
+    // Check for monthly patterns
+    if desc == "monthly" || desc.contains("day 1") || desc.contains("first day") {
+        return SECONDS_PER_MONTH;
+    }
+    
+    // Check for yearly patterns
+    if desc == "yearly" || desc == "annually" || desc.contains("annual") {
+        return SECONDS_PER_YEAR;
+    }
+    
+    // Cron shorthand patterns (e.g., @hourly, @daily, etc.)
+    if desc == "@hourly" || desc.starts_with("0 * * * *") {
+        return SECONDS_PER_HOUR;
+    }
+    if desc == "@daily" || desc == "@midnight" || desc.starts_with("0 0 * * *") {
+        return SECONDS_PER_DAY;
+    }
+    if desc == "@weekly" || desc.starts_with("0 0 * * 0") {
+        return SECONDS_PER_WEEK;
+    }
+    if desc == "@monthly" || desc.starts_with("0 0 1 * *") {
+        return SECONDS_PER_MONTH;
+    }
+    if desc == "@yearly" || desc == "@annually" || desc.starts_with("0 0 1 1 *") {
+        return SECONDS_PER_YEAR;
+    }
+    
+    // Unknown/custom schedule - log for debugging
+    debug!("Unable to parse schedule frequency from description: '{}'", desc);
+    UNKNOWN_SCHEDULE_FREQUENCY
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1368,5 +1584,137 @@ mod tests {
             convert_datetimeoffset_to_human_readable_remaining_time(dt),
             "1h 00m"
         );
+    }
+
+    // Tests for schedule frequency calculation
+
+    #[test]
+    fn test_calculate_timedelta_frequency_daily() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("days".to_string(), serde_json::json!(1));
+        obj.insert("seconds".to_string(), serde_json::json!(0));
+        assert_eq!(calculate_timedelta_frequency(&obj), SECONDS_PER_DAY);
+    }
+
+    #[test]
+    fn test_calculate_timedelta_frequency_hourly() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("days".to_string(), serde_json::json!(0));
+        obj.insert("seconds".to_string(), serde_json::json!(3600));
+        assert_eq!(calculate_timedelta_frequency(&obj), SECONDS_PER_HOUR);
+    }
+
+    #[test]
+    fn test_calculate_timedelta_frequency_invalid() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("days".to_string(), serde_json::json!(-1));
+        obj.insert("seconds".to_string(), serde_json::json!(0));
+        assert_eq!(calculate_timedelta_frequency(&obj), u64::MAX);
+    }
+
+    #[test]
+    fn test_calculate_relativedelta_frequency_monthly() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("years".to_string(), serde_json::json!(0));
+        obj.insert("months".to_string(), serde_json::json!(1));
+        obj.insert("days".to_string(), serde_json::json!(0));
+        obj.insert("hours".to_string(), serde_json::json!(0));
+        obj.insert("minutes".to_string(), serde_json::json!(0));
+        obj.insert("seconds".to_string(), serde_json::json!(0));
+        assert_eq!(calculate_relativedelta_frequency(&obj), SECONDS_PER_MONTH);
+    }
+
+    #[test]
+    fn test_calculate_relativedelta_frequency_yearly() {
+        let mut obj = serde_json::Map::new();
+        obj.insert("years".to_string(), serde_json::json!(1));
+        obj.insert("months".to_string(), serde_json::json!(0));
+        obj.insert("days".to_string(), serde_json::json!(0));
+        obj.insert("hours".to_string(), serde_json::json!(0));
+        obj.insert("minutes".to_string(), serde_json::json!(0));
+        obj.insert("seconds".to_string(), serde_json::json!(0));
+        assert_eq!(calculate_relativedelta_frequency(&obj), SECONDS_PER_YEAR);
+    }
+
+    #[test]
+    fn test_parse_timetable_description_numeric_patterns() {
+        assert_eq!(parse_timetable_description(Some("every 5 minutes")), 5 * SECONDS_PER_MINUTE);
+        assert_eq!(parse_timetable_description(Some("every 2 hours")), 2 * SECONDS_PER_HOUR);
+        assert_eq!(parse_timetable_description(Some("every 3 days")), 3 * SECONDS_PER_DAY);
+        assert_eq!(parse_timetable_description(Some("every 1 week")), SECONDS_PER_WEEK);
+        assert_eq!(parse_timetable_description(Some("every 2 months")), 2 * SECONDS_PER_MONTH);
+        assert_eq!(parse_timetable_description(Some("every 1 year")), SECONDS_PER_YEAR);
+    }
+
+    #[test]
+    fn test_parse_timetable_description_keywords() {
+        assert_eq!(parse_timetable_description(Some("hourly")), SECONDS_PER_HOUR);
+        assert_eq!(parse_timetable_description(Some("every hour")), SECONDS_PER_HOUR);
+        assert_eq!(parse_timetable_description(Some("daily")), SECONDS_PER_DAY);
+        assert_eq!(parse_timetable_description(Some("weekly")), SECONDS_PER_WEEK);
+        assert_eq!(parse_timetable_description(Some("monthly")), SECONDS_PER_MONTH);
+        assert_eq!(parse_timetable_description(Some("yearly")), SECONDS_PER_YEAR);
+        assert_eq!(parse_timetable_description(Some("annually")), SECONDS_PER_YEAR);
+    }
+
+    #[test]
+    fn test_parse_timetable_description_at_time() {
+        // "At HH:MM" should be daily
+        assert_eq!(parse_timetable_description(Some("at 09:00")), SECONDS_PER_DAY);
+        assert_eq!(parse_timetable_description(Some("at 14:30")), SECONDS_PER_DAY);
+        
+        // But "At HH:MM on Monday" should be weekly
+        assert_eq!(parse_timetable_description(Some("at 09:00 on monday")), SECONDS_PER_WEEK);
+    }
+
+    #[test]
+    fn test_parse_timetable_description_day_names() {
+        assert_eq!(parse_timetable_description(Some("monday")), SECONDS_PER_WEEK);
+        assert_eq!(parse_timetable_description(Some("tuesday")), SECONDS_PER_WEEK);
+        assert_eq!(parse_timetable_description(Some("on friday")), SECONDS_PER_WEEK);
+    }
+
+    #[test]
+    fn test_parse_timetable_description_cron_shortcuts() {
+        assert_eq!(parse_timetable_description(Some("@hourly")), SECONDS_PER_HOUR);
+        assert_eq!(parse_timetable_description(Some("@daily")), SECONDS_PER_DAY);
+        assert_eq!(parse_timetable_description(Some("@midnight")), SECONDS_PER_DAY);
+        assert_eq!(parse_timetable_description(Some("@weekly")), SECONDS_PER_WEEK);
+        assert_eq!(parse_timetable_description(Some("@monthly")), SECONDS_PER_MONTH);
+        assert_eq!(parse_timetable_description(Some("@yearly")), SECONDS_PER_YEAR);
+        assert_eq!(parse_timetable_description(Some("@annually")), SECONDS_PER_YEAR);
+    }
+
+    #[test]
+    fn test_parse_timetable_description_cron_expressions() {
+        assert_eq!(parse_timetable_description(Some("0 * * * *")), SECONDS_PER_HOUR);
+        assert_eq!(parse_timetable_description(Some("0 0 * * *")), SECONDS_PER_DAY);
+        assert_eq!(parse_timetable_description(Some("0 0 * * 0")), SECONDS_PER_WEEK);
+        assert_eq!(parse_timetable_description(Some("0 0 1 * *")), SECONDS_PER_MONTH);
+        assert_eq!(parse_timetable_description(Some("0 0 1 1 *")), SECONDS_PER_YEAR);
+    }
+
+    #[test]
+    fn test_parse_timetable_description_never() {
+        assert_eq!(parse_timetable_description(Some("never")), u64::MAX);
+        assert_eq!(parse_timetable_description(Some("Never")), u64::MAX);
+        assert_eq!(parse_timetable_description(Some("none")), u64::MAX);
+        assert_eq!(parse_timetable_description(None), u64::MAX);
+        assert_eq!(parse_timetable_description(Some("")), u64::MAX);
+    }
+
+    #[test]
+    fn test_parse_timetable_description_unknown() {
+        // Unknown patterns should return UNKNOWN_SCHEDULE_FREQUENCY
+        assert_eq!(parse_timetable_description(Some("custom schedule")), UNKNOWN_SCHEDULE_FREQUENCY);
+        assert_eq!(parse_timetable_description(Some("irregular")), UNKNOWN_SCHEDULE_FREQUENCY);
+    }
+
+    #[test]
+    fn test_parse_timetable_description_plurals() {
+        // Test that plurals work
+        assert_eq!(parse_timetable_description(Some("every 5 minutes")), 5 * SECONDS_PER_MINUTE);
+        assert_eq!(parse_timetable_description(Some("every 2 hours")), 2 * SECONDS_PER_HOUR);
+        assert_eq!(parse_timetable_description(Some("every 3 days")), 3 * SECONDS_PER_DAY);
     }
 }

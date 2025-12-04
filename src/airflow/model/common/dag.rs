@@ -28,11 +28,17 @@ pub struct Dag {
     pub tags: Vec<Tag>,
     pub file_token: String,
     pub timetable_description: Option<String>,
+    pub schedule_interval: Option<serde_json::Value>,
     
     /// Computed state priority for sorting (lower = higher priority)
     /// 0: Failed, 1: Running, 2: Recent failed (recovered), 3: Success, 4: Unknown, 5: Paused
     #[serde(skip)]
     pub computed_state_priority: Option<u8>,
+    
+    /// Computed schedule frequency in seconds (lower = more frequent)
+    /// Used for sorting by schedule frequency
+    #[serde(skip)]
+    pub computed_schedule_frequency: Option<u64>,
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -76,7 +82,9 @@ impl From<v1::model::dag::DagResponse> for Dag {
                 .collect(),
             file_token: value.file_token.clone(),
             timetable_description: value.timetable_description.clone(),
+            schedule_interval: value.schedule_interval.clone(),
             computed_state_priority: None,
+            computed_schedule_frequency: None,
         }
     }
 }
@@ -121,7 +129,9 @@ impl From<v2::model::dag::Dag> for Dag {
             tags: value.tags.into_iter().map(std::convert::Into::into).collect(),
             file_token: value.file_token,
             timetable_description: value.timetable_description,
+            schedule_interval: None,  // V2 API doesn't provide schedule_interval
             computed_state_priority: None,
+            computed_schedule_frequency: None,
         }
     }
 }
