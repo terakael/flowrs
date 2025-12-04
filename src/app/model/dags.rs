@@ -12,7 +12,7 @@ use time::OffsetDateTime;
 use crate::airflow::model::common::{Connection, Dag, DagRun, ImportError, Variable};
 use crate::app::events::custom::FlowrsEvent;
 use crate::app::model::popup::dags::commands::create_dag_command_popup;
-use crate::ui::common::{get_state_icon, hash_to_color, highlight_search_text};
+use crate::ui::common::{format_and_highlight_json, get_state_icon, hash_to_color, highlight_search_text};
 use crate::ui::constants::{ALTERNATING_ROW_COLOR, DEFAULT_STYLE, HEADER_STYLE, RED};
 
 use super::popup::commands_help::CommandPopUp;
@@ -1130,23 +1130,29 @@ impl DagModel {
                 let rows = self.filtered_variables.items.iter().enumerate().map(|(idx, item)| {
                     // Note: Airflow API doesn't return values in the list endpoint for security
                     // Users need to press Enter to view the full value
-                    let value_display = if item.value.is_some() {
-                        // If we have a value (from detail fetch), show truncated version
-                        let v = item.value.as_ref().unwrap();
-                        let cleaned = v.replace('\n', " ").replace('\r', "");
-                        if cleaned.len() > 80 {
-                            format!("{}...", &cleaned[..80])
+                    let value_line = if let Some(v) = &item.value {
+                        let (mut lines, is_json) = format_and_highlight_json(v, true, Some(80));
+                        
+                        // Extract single line from result
+                        let line = lines.pop().unwrap_or_else(|| Line::from(""));
+                        
+                        // If not JSON, style as gray text
+                        if !is_json {
+                            Line::from(Span::styled(
+                                line.spans.into_iter().map(|s| s.content.to_string()).collect::<String>(),
+                                Style::default().fg(Color::DarkGray)
+                            ))
                         } else {
-                            cleaned
+                            line
                         }
                     } else {
                         // Value not loaded - show hint
-                        "Press Enter to view".to_string()
+                        Line::from(Span::styled("Press Enter to view", Style::default().fg(Color::DarkGray)))
                     };
                     
                     Row::new(vec![
                         Line::from(highlight_search_text(&item.key, search_term, Color::Reset)),
-                        Line::from(Span::styled(value_display, Style::default().fg(Color::DarkGray))),
+                        value_line,
                     ])
                     .style(if (idx % 2) == 0 {
                         DEFAULT_STYLE

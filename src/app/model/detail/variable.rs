@@ -13,7 +13,7 @@ use ratatui::{
 use crate::{
     airflow::model::common::Variable,
     app::{events::custom::FlowrsEvent, model::{handle_vertical_scroll_keys, Model}, worker::WorkerMessage},
-    ui::constants::DEFAULT_STYLE,
+    ui::{common::format_and_highlight_json, constants::DEFAULT_STYLE},
 };
 
 pub struct VariableDetailModel {
@@ -48,19 +48,12 @@ impl VariableDetailModel {
     fn format_value(&self) -> Vec<Line<'static>> {
         if let Some(variable) = &self.variable {
             if let Some(value) = &variable.value {
-                if self.show_formatted {
-                    // Try to parse as JSON and pretty-print
-                    if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(value) {
-                        if let Ok(pretty) = serde_json::to_string_pretty(&json_value) {
-                            return pretty
-                                .lines()
-                                .map(|line| Line::from(line.to_string()))
-                                .collect();
-                        }
-                    }
-                }
-                // Fall back to raw value (or if formatting is disabled)
-                return value.lines().map(|line| Line::from(line.to_string())).collect();
+                let (lines, _is_json) = format_and_highlight_json(
+                    value,
+                    !self.show_formatted, // minify = !show_formatted
+                    None,                 // no truncation for detail view
+                );
+                return lines;
             }
         }
         vec![Line::from(Span::styled(

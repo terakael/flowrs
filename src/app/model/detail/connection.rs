@@ -10,7 +10,7 @@ use ratatui::{
 use crate::{
     airflow::model::common::Connection,
     app::{events::custom::FlowrsEvent, model::Model, worker::WorkerMessage},
-    ui::{common::hash_to_color, constants::DEFAULT_STYLE},
+    ui::{common::{format_and_highlight_json, hash_to_color}, constants::DEFAULT_STYLE},
 };
 
 pub struct ConnectionDetailModel {
@@ -113,24 +113,12 @@ impl ConnectionDetailModel {
                     Style::default().add_modifier(Modifier::BOLD),
                 )));
 
-                let extra_display = if self.show_formatted {
-                    // Try to pretty-print JSON if possible
-                    if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(extra) {
-                        if let Ok(pretty) = serde_json::to_string_pretty(&json_value) {
-                            pretty
-                        } else {
-                            extra.clone()
-                        }
-                    } else {
-                        extra.clone()
-                    }
-                } else {
-                    extra.clone()
-                };
-
-                for line in extra_display.lines() {
-                    lines.push(Line::from(line.to_string()));
-                }
+                let (highlighted_lines, _is_json) = format_and_highlight_json(
+                    extra,
+                    !self.show_formatted, // minify = !show_formatted
+                    None,                 // no truncation for detail view
+                );
+                lines.extend(highlighted_lines);
             }
 
             lines
