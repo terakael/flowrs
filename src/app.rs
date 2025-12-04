@@ -151,6 +151,22 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: Arc<Mutex<App>
                                 // Current log data will be synced after worker completes
                             }
                         }
+                        WorkerMessage::EnsureTaskLogLoaded {
+                            dag_id,
+                            dag_run_id,
+                            task_id,
+                            task_try,
+                        } => {
+                            // Sync cached log data immediately to prevent UI lag when switching tries
+                            // The current_attempt was already updated in the logs panel before this message was sent
+                            // We need to update current_log_data to match before the next render
+                            app.logs.current_log_data = app
+                                .environment_state
+                                .get_active_task_log(dag_id, dag_run_id, task_id, *task_try);
+                            
+                            // If log is not cached, worker will fetch it and sync again
+                            // If log is cached, this sync ensures the UI shows the correct log immediately
+                        }
                         _ => {}
                     }
                 }
