@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::fs;
+use anyhow::Result;
 
 use crate::airflow::{
     model::common::{Dag, DagRun, Log, TaskInstance},
@@ -25,6 +28,7 @@ pub struct TaskLog {
     pub chunks: Vec<LogChunk>,
     pub current_continuation_token: Option<String>,
     pub is_complete: bool,
+    pub file_path: Option<PathBuf>,  // Path to persisted log file on disk
 }
 
 impl TaskLog {
@@ -33,6 +37,7 @@ impl TaskLog {
             chunks: Vec::new(),
             current_continuation_token: None,
             is_complete: false,
+            file_path: None,
         }
     }
     
@@ -62,6 +67,16 @@ impl TaskLog {
     /// Check if we can load more chunks
     pub fn has_more(&self) -> bool {
         !self.is_complete
+    }
+    
+    /// Set the file path for this log
+    pub fn set_file_path(&mut self, path: PathBuf) {
+        self.file_path = Some(path);
+    }
+    
+    /// Get the file path for this log
+    pub fn get_file_path(&self) -> Option<&Path> {
+        self.file_path.as_deref()
     }
 }
 
@@ -357,6 +372,11 @@ impl EnvironmentStateContainer {
     pub fn get_active_client(&self) -> Option<Arc<dyn AirflowClientTrait>> {
         self.get_active_environment().map(|env| env.client.clone())
     }
+    
+    /// Get the name of the active environment
+    pub fn get_active_environment_name(&self) -> Option<&str> {
+        self.active_environment.as_ref().map(|s| s.as_str())
+    }
 
     /// Clear all DAGs from the active environment
     pub fn clear_active_environment_dags(&mut self) {
@@ -481,4 +501,124 @@ impl Default for EnvironmentStateContainer {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ============================================================================
+// Log Persistence Functions
+// ============================================================================
+
+/// Get the cache directory for flowrs logs
+pub fn get_logs_cache_dir() -> Result<PathBuf> {
+    let cache_dir = dirs::cache_dir()
+        .ok_or_else(|| anyhow::anyhow!("Could not determine cache directory"))?
+        .join("flowrs")
+        .join("logs");
+    
+    fs::create_dir_all(&cache_dir)?;
+    Ok(cache_dir)
+}
+
+/// Sanitize a string for use in filenames by replacing problematic characters
+fn sanitize_filename(s: &str) -> String {
+    s.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], "_")
+}
+
+/// Get filepath for a specific task log
+/// Creates directory structure if it doesn't exist
+pub fn get_log_filepath(
+    env_name: &str,
+    dag_id: &str,
+    dag_run_id: &str,
+    task_id: &str,
+    try_num: u16,
+) -> Result<PathBuf> {
+    let cache_dir = get_logs_cache_dir()?;
+    
+    // Sanitize path components to prevent directory traversal
+    let safe_env = sanitize_filename(env_name);
+    let safe_dag_id = sanitize_filename(dag_id);
+    let safe_dag_run_id = sanitize_filename(dag_run_id);
+    let safe_task_id = sanitize_filename(task_id);
+    
+    let dir = cache_dir
+        .join(safe_env)
+        .join(safe_dag_id)
+        .join(safe_dag_run_id)
+        .join(safe_task_id);
+    
+    fs::create_dir_all(&dir)?;
+    
+    Ok(dir.join(format!("attempt_{}.log", try_num)))
+}
+
+/// Save log content to disk with proper unescaping
+/// Converts escaped newlines (\\n) to actual newlines for proper editor display
+/// Uses the shared parsing logic from the logs module
+pub fn save_log_to_disk(filepath: &Path, content: &str) -> Result<()> {
+    use crate::app::model::logs::parse_and_unescape_log_content;
+    
+    let unescaped = parse_and_unescape_log_content(content);
+    fs::write(filepath, unescaped)?;
+    log::debug!("Saved log to disk: {}", filepath.display());
+    Ok(())
+}
+
+/// Clean old log files from cache (older than days_to_keep)
+pub fn cleanup_old_logs(days_to_keep: u64) -> Result<usize> {
+    use std::time::{SystemTime, Duration};
+    
+    let cache_dir = match get_logs_cache_dir() {
+        Ok(dir) => dir,
+        Err(_) => return Ok(0), // Cache dir doesn't exist yet, nothing to clean
+    };
+    
+    if !cache_dir.exists() {
+        return Ok(0);
+    }
+    
+    let cutoff = SystemTime::now() - Duration::from_secs(days_to_keep * 24 * 60 * 60);
+    let mut deleted_count = 0;
+    
+    // Recursively walk the cache directory
+    fn cleanup_dir(dir: &Path, cutoff: SystemTime, deleted: &mut usize) -> Result<()> {
+        if !dir.is_dir() {
+            return Ok(());
+        }
+        
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            
+            if path.is_dir() {
+                cleanup_dir(&path, cutoff, deleted)?;
+                
+                // Remove directory if empty
+                if fs::read_dir(&path)?.next().is_none() {
+                    fs::remove_dir(&path)?;
+                    log::debug!("Removed empty directory: {}", path.display());
+                }
+            } else if path.is_file() {
+                // Check file modification time
+                if let Ok(metadata) = entry.metadata() {
+                    if let Ok(modified) = metadata.modified() {
+                        if modified < cutoff {
+                            fs::remove_file(&path)?;
+                            *deleted += 1;
+                            log::debug!("Deleted old log file: {}", path.display());
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    cleanup_dir(&cache_dir, cutoff, &mut deleted_count)?;
+    
+    if deleted_count > 0 {
+        log::info!("Cleaned up {} old log files from cache", deleted_count);
+    }
+    
+    Ok(deleted_count)
 }

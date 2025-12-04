@@ -100,6 +100,9 @@ pub enum WorkerMessage {
         dag_id: String,
     },
     OpenItem(OpenItem),
+    OpenInEditor {
+        filepath: std::path::PathBuf,
+    },
     // Variables and Connections
     UpdateVariables,
     GetVariableDetail {
@@ -142,6 +145,73 @@ pub enum OpenItem {
 impl Worker {
     pub fn new(app: Arc<Mutex<App>>, rx_worker: Receiver<WorkerMessage>, tx_worker: Sender<WorkerMessage>) -> Self {
         Worker { app, rx: rx_worker, tx: tx_worker }
+    }
+    
+    /// Helper function to persist logs to disk after adding a chunk
+    /// This is called every time a log chunk is added (incremental persistence)
+    fn persist_log_to_disk(
+        &self,
+        dag_id: &str,
+        dag_run_id: &str,
+        task_id: &str,
+        task_try: u16,
+    ) {
+        use crate::app::environment_state::{get_log_filepath, save_log_to_disk};
+        
+        let app = self.app.lock().unwrap();
+        
+        // Get environment name
+        let env_name = match app.environment_state.get_active_environment_name() {
+            Some(name) => name,
+            None => {
+                log::warn!("No active environment when trying to persist log");
+                return;
+            }
+        };
+        
+        // Get the current log data
+        let log_data = match app.environment_state.get_active_task_log(dag_id, dag_run_id, task_id, task_try) {
+            Some(log) => log,
+            None => {
+                log::warn!("Could not find log data when trying to persist");
+                return;
+            }
+        };
+        
+        // Get filepath
+        let filepath = match get_log_filepath(env_name, dag_id, dag_run_id, task_id, task_try) {
+            Ok(path) => path,
+            Err(e) => {
+                log::warn!("Failed to get log filepath: {}", e);
+                return;
+            }
+        };
+        
+        // Save to disk
+        let content = log_data.full_content();
+        if let Err(e) = save_log_to_disk(&filepath, &content) {
+            log::warn!("Failed to persist log to disk: {}", e);
+            return;
+        }
+        
+        // Update TaskLog with file path (need to drop lock and re-acquire with mut)
+        drop(app); // Drop the read lock
+        let mut app = self.app.lock().unwrap();
+        if let Some(env) = app.environment_state.get_active_environment_mut() {
+            if let Some(dag_data) = env.dags.get_mut(dag_id) {
+                if let Some(dag_run_data) = dag_data.dag_runs.get_mut(dag_run_id) {
+                    if let Some(task_data) = dag_run_data.task_instances.get_mut(task_id) {
+                        if let Some(task_log) = task_data.logs.get_mut(&task_try) {
+                            task_log.set_file_path(filepath.clone());
+                            log::debug!("Set file path for log: {}", filepath.display());
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Sync panel data to update current_log_data with the new file_path
+        app.sync_panel_data();
     }
 
     pub async fn process_message(&mut self, message: WorkerMessage) -> Result<()> {
@@ -746,14 +816,19 @@ impl Worker {
                         debug!("Received log chunk: {} bytes, continuation_token: {:?}", 
                             log.content.len(), log.continuation_token);
                         
-                        let mut app = self.app.lock().unwrap();
-                        
-                        if let Some(env) = app.environment_state.get_active_environment_mut() {
-                            env.add_task_log_chunk(&dag_id, &dag_run_id, &task_id, task_try, log);
+                        {
+                            let mut app = self.app.lock().unwrap();
+                            
+                            if let Some(env) = app.environment_state.get_active_environment_mut() {
+                                env.add_task_log_chunk(&dag_id, &dag_run_id, &task_id, task_try, log);
+                            }
+                            
+                            app.logs.is_loading_initial = false;  // Clear loading flag
+                            app.sync_panel_data();
                         }
                         
-                        app.logs.is_loading_initial = false;  // Clear loading flag
-                        app.sync_panel_data();
+                        // Persist log to disk after adding chunk
+                        self.persist_log_to_disk(&dag_id, &dag_run_id, &task_id, task_try);
                     }
                     Err(e) => {
                         let mut app = self.app.lock().unwrap();
@@ -797,14 +872,20 @@ impl Worker {
                     ).await;
                     
                     if let Ok(log) = log_result {
-                        let mut app = self.app.lock().unwrap();
-                        if let Some(env) = app.environment_state.get_active_environment_mut() {
-                            env.add_task_log_chunk(&dag_id, &dag_run_id, &task_id, task_try, log);
+                        {
+                            let mut app = self.app.lock().unwrap();
+                            if let Some(env) = app.environment_state.get_active_environment_mut() {
+                                env.add_task_log_chunk(&dag_id, &dag_run_id, &task_id, task_try, log);
+                            }
+                            app.logs.is_loading_initial = false;  // Clear loading flag
+                            app.sync_panel_data();
                         }
-                        app.logs.is_loading_initial = false;  // Clear loading flag
-                        app.sync_panel_data();
+                        
+                        // Persist log to disk after adding chunk
+                        self.persist_log_to_disk(&dag_id, &dag_run_id, &task_id, task_try);
                         
                         // Evict old attempts from cache (keep last 5)
+                        let mut app = self.app.lock().unwrap();
                         let keep_attempts: Vec<u16> = app.logs.lru_cache.iter().copied().collect();
                         if let Some(env) = app.environment_state.get_active_environment_mut() {
                             env.evict_task_logs_not_in_cache(&dag_id, &dag_run_id, &task_id, &keep_attempts);
@@ -841,12 +922,17 @@ impl Worker {
                         debug!("LoadMore: Received chunk: {} bytes, continuation_token: {:?}", 
                             log.content.len(), log.continuation_token);
                         
-                        let mut app = self.app.lock().unwrap();
-                        if let Some(env) = app.environment_state.get_active_environment_mut() {
-                            env.add_task_log_chunk(&dag_id, &dag_run_id, &task_id, task_try, log);
+                        {
+                            let mut app = self.app.lock().unwrap();
+                            if let Some(env) = app.environment_state.get_active_environment_mut() {
+                                env.add_task_log_chunk(&dag_id, &dag_run_id, &task_id, task_try, log);
+                            }
+                            app.logs.is_loading_more = false;
+                            app.sync_panel_data();
                         }
-                        app.logs.is_loading_more = false;
-                        app.sync_panel_data();
+                        
+                        // Persist log to disk after adding chunk
+                        self.persist_log_to_disk(&dag_id, &dag_run_id, &task_id, task_try);
                     }
                     Err(e) => {
                         let mut app = self.app.lock().unwrap();
@@ -951,6 +1037,12 @@ impl Worker {
             WorkerMessage::OpenItem(item) => {
                 let url = client.build_open_url(&item)?;
                 webbrowser::open(&url).unwrap();
+            }
+            WorkerMessage::OpenInEditor { .. } => {
+                // OpenInEditor is handled in the main event loop (app.rs)
+                // where we have access to the terminal for proper suspension
+                // This case should never be reached
+                log::warn!("OpenInEditor message received in worker (should be handled in main loop)");
             }
             WorkerMessage::UpdateVariables => {
                 use crate::airflow::traits::VariableOperations;

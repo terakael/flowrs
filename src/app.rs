@@ -17,12 +17,21 @@ pub mod model;
 pub mod state;
 pub mod worker;
 
+// Wait for in-flight event reads to complete before opening editor
+const EVENT_DRAIN_DELAY_MS: u64 = 100;
+
 pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: Arc<Mutex<App>>) -> Result<()> {
     let mut events = EventGenerator::new(200);
     let ui_app = app.clone();
     let worker_app = app.clone();
 
     let (tx_worker, rx_worker) = tokio::sync::mpsc::channel::<WorkerMessage>(100);
+
+    // Clean up old log files from cache (older than 7 days)
+    log::info!("Cleaning up old log files from cache");
+    if let Err(e) = environment_state::cleanup_old_logs(7) {
+        log::warn!("Failed to cleanup old logs: {}", e);
+    }
 
     log::info!("Initializing environment state");
     {
@@ -143,9 +152,46 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: Arc<Mutex<App>
             }
 
             // Now send messages to worker for async processing
+            // Special case: OpenInEditor needs terminal access, handle it here
             for message in messages {
-                if let Err(e) = tx_worker.send(message).await {
-                    log::error!("Failed to send message to worker: {e}");
+                match message {
+                    WorkerMessage::OpenInEditor { filepath } => {
+                        // Handle OpenInEditor in the main loop where we have terminal access
+                        log::info!("Opening log file in editor: {}", filepath.display());
+                        
+                        // Pause event generator to stop consuming stdin events
+                        events.pause();
+                        
+                        // Wait a bit for any in-flight event reads to complete
+                        tokio::time::sleep(tokio::time::Duration::from_millis(EVENT_DRAIN_DELAY_MS)).await;
+                        
+                        if let Err(e) = crate::editor::open_in_editor_with_suspend(terminal, &filepath) {
+                            log::error!("Failed to open editor: {}", e);
+                            // Show error popup
+                            let mut app = app.lock().unwrap();
+                            app.logs.error_popup = Some(crate::app::model::popup::error::ErrorPopup::from_strings(vec![
+                                "Failed to open editor:".into(),
+                                e.to_string(),
+                            ]));
+                        }
+                        
+                        // Resume event generator
+                        events.resume();
+                        
+                        // Drain any events that were captured while editor was open
+                        // The EventGenerator background task may have polled and buffered events
+                        // that were meant for the editor. We need to discard them.
+                        log::debug!("Draining event queue after editor close");
+                        while events.rx_event.try_recv().is_ok() {
+                            // Discard buffered events
+                        }
+                    }
+                    _ => {
+                        // All other messages go to worker
+                        if let Err(e) = tx_worker.send(message).await {
+                            log::error!("Failed to send message to worker: {e}");
+                        }
+                    }
                 }
             }
             

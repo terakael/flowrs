@@ -28,7 +28,9 @@ use crate::{
 };
 
 use super::popup::error::ErrorPopup;
-use super::{Model, handle_vertical_scroll_keys};
+use super::popup::commands_help::CommandPopUp;
+use super::popup::logs::commands::create_log_command_popup;
+use super::{Model, handle_vertical_scroll_keys, handle_command_popup_events};
 
 // Constants for log viewer configuration
 const LRU_CACHE_SIZE: usize = 5;          // Number of recently viewed attempts to keep in cache
@@ -90,6 +92,7 @@ pub struct LogModel {
     pub is_loading_more: bool,            // Loading next chunk
     pub is_loading_initial: bool,         // Loading initial chunk (show spinner)
     pub lru_cache: VecDeque<u16>,         // Last 5 viewed attempts
+    commands: Option<CommandPopUp<'static>>, // Help popup
     pub error_popup: Option<ErrorPopup>,
     pub min_log_level: LogLevel,          // Minimum log level to display
     ticks: u32,
@@ -118,6 +121,7 @@ impl LogModel {
             is_loading_more: false,
             is_loading_initial: false,
             lru_cache: VecDeque::new(),
+            commands: None,
             error_popup: None,
             min_log_level: LogLevel::Info,  // Default to INFO
             ticks: 0,
@@ -295,6 +299,11 @@ impl Model for LogModel {
                 return (Some(FlowrsEvent::Tick), vec![]);
             }
             FlowrsEvent::Key(key) => {
+                // Handle command popup first
+                if self.commands.is_some() {
+                    return handle_command_popup_events(&mut self.commands, key);
+                }
+                
                 if let Some(_error_popup) = &mut self.error_popup {
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => {
@@ -421,6 +430,30 @@ impl Model for LogModel {
                             );
                         }
                     }
+                    KeyCode::Char('e') => {
+                        // Open logs in external editor
+                        if let Some(log_data) = &self.current_log_data {
+                            log::debug!("Attempting to open log in editor, file_path: {:?}", log_data.get_file_path());
+                            if let Some(filepath) = log_data.get_file_path() {
+                                log::info!("Opening log file in editor: {}", filepath.display());
+                                return (
+                                    None,
+                                    vec![WorkerMessage::OpenInEditor {
+                                        filepath: filepath.to_path_buf(),
+                                    }],
+                                );
+                            } else {
+                                // Fallback: show error that logs aren't persisted yet
+                                log::warn!("Log file_path not set in current_log_data");
+                                self.error_popup = Some(ErrorPopup::from_strings(vec![
+                                    "Log file not found on disk".into(),
+                                    "Try refreshing logs with 'r'".into(),
+                                ]));
+                            }
+                        } else {
+                            log::warn!("No current_log_data available");
+                        }
+                    }
                     KeyCode::Char('r') => {
                         // Manual refresh - reload current attempt's logs
                         if let (Some(dag_id), Some(dag_run_id), Some(task_id)) = 
@@ -469,6 +502,10 @@ impl Model for LogModel {
                             _ => unreachable!(),
                         };
                         self.vertical_scroll = 0;  // Reset scroll when changing filter
+                        return (None, vec![]);
+                    }
+                    KeyCode::Char('?') => {
+                        self.commands = Some(create_log_command_popup());
                         return (None, vec![]);
                     }
 
@@ -635,6 +672,11 @@ impl Widget for &mut LogModel {
         
         scrollbar.render(area, buffer, &mut self.vertical_scroll_state);
         
+        // Command popup
+        if let Some(commands) = &mut self.commands {
+            commands.render(area, buffer);
+        }
+        
         // Error popup
         if let Some(error_popup) = &self.error_popup {
             error_popup.render(area, buffer);
@@ -665,7 +707,7 @@ lazy_regex!(
 
 // Log content is a list of tuples of form ('element1', 'element2'), i.e. serialized python tuples
 // The second element can be single or double quoted depending on content
-fn parse_content(content: &str) -> Vec<(String, String)> {
+pub(crate) fn parse_content(content: &str) -> Vec<(String, String)> {
     // Use pre-compiled regex
     let re = get_log_regex();
 
@@ -682,6 +724,26 @@ fn parse_content(content: &str) -> Vec<(String, String)> {
             (first, second)
         })
         .collect()
+}
+
+/// Parse and unescape log content for saving to disk
+/// Handles both v1 (tuple format with escaped newlines) and v2 (plain text) formats
+/// This is the shared implementation used by both rendering and disk persistence
+pub(crate) fn parse_and_unescape_log_content(content: &str) -> String {
+    let fragments = parse_content(content);
+    
+    if fragments.is_empty() {
+        // v2 format - already plain text, no escaping needed
+        content.to_string()
+    } else {
+        // v1 format - extract log fragments and unescape newlines
+        let mut result = String::new();
+        for (_, log_fragment) in fragments {
+            let unescaped = log_fragment.replace("\\n", "\n");
+            result.push_str(&unescaped);
+        }
+        result
+    }
 }
 
 // Parse source location into filename and line number

@@ -7,6 +7,7 @@ use ui::constants::ASCII_LOGO;
 mod airflow;
 mod app;
 mod commands;
+mod editor;
 mod ui;
 
 use anyhow::Result;
