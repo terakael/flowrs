@@ -1,12 +1,12 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::{
     buffer::Buffer,
-    layout::{Constraint, Layout, Rect},
+    layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{
         Block, BorderType, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-        StatefulWidget, Tabs, Widget,
+        StatefulWidget, Widget,
     },
 };
 use regex::Regex;
@@ -23,7 +23,7 @@ use crate::{
     },
     ui::common::hash_to_color,
     ui::constants::{
-        DM_RGB, BRIGHT_BLACK, CYAN, BLUE, GREEN, YELLOW, RED, FOREGROUND, MAGENTA,
+        BRIGHT_BLACK, CYAN, BLUE, GREEN, YELLOW, RED, FOREGROUND, MAGENTA, DEFAULT_STYLE,
     },
 };
 
@@ -32,8 +32,8 @@ use super::{Model, handle_vertical_scroll_keys};
 
 // Constants for log viewer configuration
 const LRU_CACHE_SIZE: usize = 5;          // Number of recently viewed attempts to keep in cache
-const MAX_VISIBLE_TABS: usize = 5;        // Maximum attempt tabs visible at once
 const VIRTUAL_SCROLL_BUFFER: usize = 100; // Lines to render beyond visible viewport
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub struct LogModel {
     pub dag_id: Option<String>,
@@ -54,6 +54,8 @@ pub struct LogModel {
     cached_lines: Vec<String>,            // CACHE: Parsed lines to avoid reparsing every frame
     cached_content_hash: u64,             // Hash to detect when content changes
     event_buffer: Vec<FlowrsEvent>,       // Buffer for 'gg' detection
+    cached_log_date: Option<String>,      // CACHE: Extracted date from first log line
+    cached_log_timezone: Option<String>,  // CACHE: Extracted timezone from first log line
 }
 
 impl LogModel {
@@ -77,6 +79,8 @@ impl LogModel {
             cached_lines: Vec::new(),
             cached_content_hash: 0,
             event_buffer: Vec::new(),
+            cached_log_date: None,
+            cached_log_timezone: None,
         }
     }
     
@@ -100,6 +104,84 @@ impl LogModel {
         // Temporarily disabled - auto-loading entire chunks causes freezing
         // User can manually load more with 'm' key
         None
+    }
+    
+    /// Clear all cached rendering data (call when switching attempts or tasks)
+    fn clear_render_cache(&mut self) {
+        self.cached_log_date = None;
+        self.cached_log_timezone = None;
+        self.cached_lines.clear();
+        self.cached_content_hash = 0;
+    }
+    
+    /// Reset state when switching to a new task
+    pub fn reset_for_new_task(&mut self, dag_id: String, dag_run_id: String, task_id: String, task_try: u16) {
+        self.dag_id = Some(dag_id);
+        self.dag_run_id = Some(dag_run_id);
+        self.task_id = Some(task_id);
+        self.tries = Some(task_try);
+        self.current_attempt = task_try as usize;
+        self.vertical_scroll = 0;
+        self.clear_render_cache();
+        self.update_lru(task_try);
+        self.is_loading_initial = true;
+    }
+    
+    /// Build the top title line with semantic colors for each component:
+    /// - YELLOW: Panel name (primary identifier)
+    /// - GREEN: Try info (success/progress indicator)
+    /// - CYAN: Date/timezone (temporal context) and separators (matching border)
+    /// - BLUE: DAG ID (entity identifier)
+    /// - MAGENTA: Task ID (sub-entity identifier)
+    fn build_title_line(&self, total_tries: usize) -> Line<'static> {
+        let mut title_spans = Vec::new();
+        
+        // "Logs" label in yellow
+        title_spans.push(Span::styled("Logs".to_string(), Style::default().fg(YELLOW)));
+        
+        // Try info (if multiple tries)
+        if total_tries > 1 {
+            title_spans.push(Span::styled(" - ".to_string(), Style::default().fg(CYAN)));
+            title_spans.push(Span::styled(
+                format!("Try {}/{}", self.current_attempt, total_tries),
+                Style::default().fg(GREEN)
+            ));
+        }
+        
+        // Date and timezone
+        if let (Some(date), Some(tz)) = (&self.cached_log_date, &self.cached_log_timezone) {
+            title_spans.push(Span::styled(" - ".to_string(), Style::default().fg(CYAN)));
+            title_spans.push(Span::styled(date.clone(), Style::default().fg(CYAN)));
+            title_spans.push(Span::raw(" "));
+            title_spans.push(Span::styled(tz.clone(), Style::default().fg(CYAN)));
+        }
+        
+        // DAG ID
+        if let Some(dag_id) = &self.dag_id {
+            title_spans.push(Span::styled(" - ".to_string(), Style::default().fg(CYAN)));
+            title_spans.push(Span::styled(dag_id.clone(), Style::default().fg(BLUE)));
+        }
+        
+        // Task ID
+        if let Some(task_id) = &self.task_id {
+            title_spans.push(Span::styled(" - ".to_string(), Style::default().fg(CYAN)));
+            title_spans.push(Span::styled(task_id.clone(), Style::default().fg(MAGENTA)));
+        }
+        
+        Line::from(title_spans)
+    }
+    
+    /// Build the bottom title with line count and loading status
+    fn build_bottom_title(&self, total_lines: usize, log_data: &TaskLog) -> String {
+        let frame = SPINNER_FRAMES[self.ticks as usize % SPINNER_FRAMES.len()];
+        
+        if self.is_loading_more {
+            format!("{} lines ({} loading more...)", total_lines, frame)
+        } else if log_data.has_more() {
+            format!("{} lines (press 'm' for more)", total_lines)
+        } else {
+            format!("{} lines", total_lines)
+        }
     }
 }
 
@@ -174,6 +256,7 @@ impl Model for LogModel {
                         
                         self.current_attempt = next_attempt;
                         self.vertical_scroll = 0;
+                        self.clear_render_cache();
                         self.update_lru(next_attempt as u16);
                         
                         return (None, vec![WorkerMessage::EnsureTaskLogLoaded {
@@ -194,6 +277,7 @@ impl Model for LogModel {
                         
                         self.current_attempt = prev_attempt;
                         self.vertical_scroll = 0;
+                        self.clear_render_cache();
                         self.update_lru(prev_attempt as u16);
                         
                         return (None, vec![WorkerMessage::EnsureTaskLogLoaded {
@@ -298,8 +382,7 @@ impl Widget for &mut LogModel {
         // Check if we have log data
         if self.current_log_data.is_none() || self.is_loading_initial {
             // Show loading spinner
-            let spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-            let frame = spinner_frames[self.ticks as usize % spinner_frames.len()];
+            let frame = SPINNER_FRAMES[self.ticks as usize % SPINNER_FRAMES.len()];
             let loading_text = if self.is_loading_initial {
                 format!("{} Loading logs...", frame)
             } else {
@@ -320,65 +403,9 @@ impl Widget for &mut LogModel {
         let log_data = self.current_log_data.as_ref().unwrap();
         let total_tries = self.tries.unwrap_or(1) as usize;
         
-        // Scrollable tabs
-        let (start_idx, end_idx, prefix, suffix) = if total_tries <= MAX_VISIBLE_TABS {
-            (1, total_tries + 1, "", "")
-        } else {
-            let half_window = MAX_VISIBLE_TABS / 2;
-            let mut start = self.current_attempt.saturating_sub(half_window);
-            let mut end = start + MAX_VISIBLE_TABS;
-            
-            if end > total_tries {
-                end = total_tries;
-                start = end.saturating_sub(MAX_VISIBLE_TABS).max(1);
-            }
-            
-            let prefix = if start > 1 { "← " } else { "" };
-            let suffix = if end < total_tries { " →" } else { "" };
-            
-            (start, end + 1, prefix, suffix)
-        };
-        
-        let tab_titles: Vec<String> = (start_idx..end_idx)
-            .map(|i| {
-                if i == self.current_attempt {
-                    format!("[ Try {} ]", i)  // Highlight current
-                } else {
-                    format!("Try {}", i)
-                }
-            })
-            .collect();
-        
-        let title = if total_tries > 1 {
-            format!("{}Logs (Attempt {}/{}){}",  prefix, self.current_attempt, total_tries, suffix)
-        } else {
-            "Logs".to_string()
-        };
-        
-        let tabs = Tabs::new(tab_titles)
-            .block(
-                Block::default()
-                    .border_type(BorderType::Rounded)
-                    .title(title)
-                    .borders(Borders::ALL),
-            )
-            .select(self.current_attempt - start_idx)
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .style(Style::default().fg(DM_RGB));
-        
-        tabs.render(area, buffer);
-        
-        // Layout: tabs + content
-        let chunks = Layout::default()
-            .constraints([Constraint::Length(3), Constraint::Min(0)])
-            .split(area);
-        
         // Cache viewport height for auto-load check
-        self.last_viewport_height = (chunks[1].height as usize).saturating_sub(2);
+        // Subtract 2 for top and bottom borders (BorderType::Rounded with Borders::ALL)
+        self.last_viewport_height = (area.height as usize).saturating_sub(2);
         
         // Check if we need to reparse (content changed)
         let full_content = log_data.full_content();
@@ -405,6 +432,18 @@ impl Widget for &mut LogModel {
                 lines
             };
             
+            // Extract date and timezone from first matching log line
+            self.cached_log_date = None;
+            self.cached_log_timezone = None;
+            // Find the first line that matches the log format (skip any header/metadata lines)
+            for line in &self.cached_lines {
+                if let Some((date, timezone)) = extract_date_and_timezone(line) {
+                    self.cached_log_date = Some(date);
+                    self.cached_log_timezone = Some(timezone);
+                    break;
+                }
+            }
+            
             log::debug!("LOG CACHE - Parsed into {} lines", self.cached_lines.len());
             self.cached_content_hash = content_hash;
         } else {
@@ -425,8 +464,12 @@ impl Widget for &mut LogModel {
         // Build Text with only visible lines (no padding), colorized
         let mut content = Text::default();
         if start_line < end_line && end_line <= all_lines.len() {
+            // Get cached date and timezone for skipping
+            let skip_date = self.cached_log_date.as_deref();
+            let skip_timezone = self.cached_log_timezone.as_deref();
+            
             for line in &all_lines[start_line..end_line] {
-                content.push_line(colorize_log_line(line));
+                content.push_line(colorize_log_line_with_options(line, skip_date, skip_timezone));
             }
         }
         
@@ -437,17 +480,9 @@ impl Widget for &mut LogModel {
         log::debug!("RENDER - Total: {}, Window: {}-{}, Scroll: {} -> {}", 
             total_lines, start_line, end_line, self.vertical_scroll, window_scroll);
         
-        // Build content title with status
-        let spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        let frame = spinner_frames[self.ticks as usize % spinner_frames.len()];
-        
-        let content_title = if self.is_loading_more {
-            format!("Content ({} lines, {} loading more...)", total_lines, frame)
-        } else if log_data.has_more() {
-            format!("Content ({} lines, press 'm' for more)", total_lines)
-        } else {
-            format!("Content ({} lines, complete)", total_lines)
-        };
+        // Build titles using helper methods
+        let title = self.build_title_line(total_tries);
+        let bottom_title = self.build_bottom_title(total_lines, log_data);
         
         #[allow(clippy::cast_possible_truncation)]
         let paragraph = Paragraph::new(content)
@@ -455,14 +490,16 @@ impl Widget for &mut LogModel {
                 Block::default()
                     .border_type(BorderType::Rounded)
                     .borders(Borders::ALL)
-                    .title(content_title),
+                    .border_style(DEFAULT_STYLE.fg(CYAN))
+                    .title(title)
+                    .title_bottom(bottom_title),
             )
             // NO WRAPPING - long lines truncate at screen edge (like vim/less)
             // This ensures 1 logical line = 1 visual line for accurate scrolling
             .style(Style::default().fg(Color::White))
             .scroll((window_scroll as u16, self.horizontal_scroll));
         
-        paragraph.render(chunks[1], buffer);
+        paragraph.render(area, buffer);
         
         // Scrollbar - configure with total content length for proper thumb sizing
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -474,7 +511,7 @@ impl Widget for &mut LogModel {
             .content_length(total_lines)
             .viewport_content_length(viewport_height);
         
-        scrollbar.render(chunks[1], buffer, &mut self.vertical_scroll_state);
+        scrollbar.render(area, buffer, &mut self.vertical_scroll_state);
         
         // Error popup
         if let Some(error_popup) = &self.error_popup {
@@ -536,6 +573,77 @@ fn parse_source_location(source: &str) -> (&str, &str) {
     }
 }
 
+// Extract date and timezone from a log line (returns first occurrence)
+// Example: "[2025-12-02T04:00:02.468+0900] ..." -> Some(("2025-12-02", "+0900"))
+fn extract_date_and_timezone(line: &str) -> Option<(String, String)> {
+    let re = get_log_line_regex();
+    if let Some(captures) = re.captures(line) {
+        let timestamp = &captures[1];
+        let (date_part, _, _, _, timezone) = parse_timestamp(timestamp);
+        if !date_part.is_empty() && !timezone.is_empty() {
+            return Some((date_part.to_string(), timezone.to_string()));
+        }
+    }
+    None
+}
+
+// Build timestamp spans with optional skipping of date/timezone components
+fn build_timestamp_spans(
+    timestamp: &str,
+    skip_date: Option<&str>,
+    skip_timezone: Option<&str>,
+) -> Vec<Span<'static>> {
+    let mut spans = vec![
+        Span::styled("[".to_string(), Style::default().fg(BRIGHT_BLACK)),
+    ];
+    
+    let (date_part, t_sep, time_part, millis, timezone) = parse_timestamp(timestamp);
+    
+    // Check if we should skip date/timezone (when they match cached values)
+    let should_skip_date = skip_date.is_some() && skip_date == Some(date_part);
+    let should_skip_timezone = skip_timezone.is_some() && skip_timezone == Some(timezone);
+    
+    // Add date part if present and not skipped (BLUE - calm, readable date color)
+    if !date_part.is_empty() && !should_skip_date {
+        spans.push(Span::styled(date_part.to_string(), Style::default().fg(BLUE)));
+        // Add T separator if showing date
+        if !t_sep.is_empty() {
+            spans.push(Span::styled(t_sep.to_string(), Style::default().fg(BRIGHT_BLACK)));
+        }
+    }
+    
+    // Add time part (HH:MM:SS) in YELLOW for easy scanning
+    if !time_part.is_empty() {
+        spans.push(Span::styled(time_part.to_string(), Style::default().fg(YELLOW)));
+    }
+    
+    // Add milliseconds in GRAY (de-emphasized as requested)
+    if !millis.is_empty() {
+        spans.push(Span::styled(millis.to_string(), Style::default().fg(BRIGHT_BLACK)));
+    }
+    
+    // Add timezone with gray separator (only if not skipped)
+    if !timezone.is_empty() && !should_skip_timezone {
+        // Split timezone into separator (+/-) and offset
+        if timezone.len() > 1 {
+            let tz_sep = &timezone[..1];  // + or -
+            let tz_offset = &timezone[1..];  // 0900
+            spans.push(Span::styled(tz_sep.to_string(), Style::default().fg(BRIGHT_BLACK)));
+            spans.push(Span::styled(tz_offset.to_string(), Style::default().fg(MAGENTA)));
+        } else {
+            spans.push(Span::styled(timezone.to_string(), Style::default().fg(MAGENTA)));
+        }
+    }
+    
+    // If timestamp parsing failed, just show the whole timestamp
+    if date_part.is_empty() && time_part.is_empty() {
+        spans.push(Span::styled(timestamp.to_string(), Style::default().fg(CYAN)));
+    }
+    
+    spans.push(Span::styled("]".to_string(), Style::default().fg(BRIGHT_BLACK)));
+    spans
+}
+
 // Parse timestamp to extract components for highlighting
 // Example: "2025-12-02T04:00:02.468+0900" -> ("2025-12-02", "T", "04:00:02", ".468", "+0900")
 // Returns: (date, t_sep, time, millis, timezone)
@@ -574,7 +682,8 @@ fn parse_timestamp(timestamp: &str) -> (&str, &str, &str, &str, &str) {
 }
 
 // Colorize a single log line based on Airflow log format
-fn colorize_log_line(line: &str) -> Line<'static> {
+// If skip_date and skip_timezone are Some, those components will be omitted from the timestamp
+fn colorize_log_line_with_options(line: &str, skip_date: Option<&str>, skip_timezone: Option<&str>) -> Line<'static> {
     let re = get_log_line_regex();
     
     if let Some(captures) = re.captures(line) {
@@ -590,54 +699,8 @@ fn colorize_log_line(line: &str) -> Line<'static> {
         // Get log level style for coordinating colors
         let level_style = get_level_style(level);
         
-        // Parse timestamp to highlight time component with gray separators
-        let (date_part, t_sep, time_part, millis, timezone) = parse_timestamp(timestamp);
-        
-        // Build styled spans with separate colors for each component
-        let mut spans = vec![
-            // [timestamp] - brackets gray, components colored, separators gray
-            Span::styled("[".to_string(), Style::default().fg(BRIGHT_BLACK)),
-        ];
-        
-        // Add date part if present (BLUE - calm, readable date color)
-        if !date_part.is_empty() {
-            spans.push(Span::styled(date_part.to_string(), Style::default().fg(BLUE)));
-        }
-        
-        // Add T separator (GRAY - structural element)
-        if !t_sep.is_empty() {
-            spans.push(Span::styled(t_sep.to_string(), Style::default().fg(BRIGHT_BLACK)));
-        }
-        
-        // Add time part (HH:MM:SS) in YELLOW for easy scanning
-        if !time_part.is_empty() {
-            spans.push(Span::styled(time_part.to_string(), Style::default().fg(YELLOW)));
-        }
-        
-        // Add milliseconds in CYAN (secondary detail)
-        if !millis.is_empty() {
-            spans.push(Span::styled(millis.to_string(), Style::default().fg(CYAN)));
-        }
-        
-        // Add timezone with gray separator
-        if !timezone.is_empty() {
-            // Split timezone into separator (+/-) and offset
-            if timezone.len() > 1 {
-                let tz_sep = &timezone[..1];  // + or -
-                let tz_offset = &timezone[1..];  // 0900
-                spans.push(Span::styled(tz_sep.to_string(), Style::default().fg(BRIGHT_BLACK)));
-                spans.push(Span::styled(tz_offset.to_string(), Style::default().fg(MAGENTA)));
-            } else {
-                spans.push(Span::styled(timezone.to_string(), Style::default().fg(MAGENTA)));
-            }
-        }
-        
-        // If timestamp parsing failed, just show the whole timestamp
-        if date_part.is_empty() && time_part.is_empty() {
-            spans.push(Span::styled(timestamp.to_string(), Style::default().fg(CYAN)));
-        }
-        
-        spans.push(Span::styled("]".to_string(), Style::default().fg(BRIGHT_BLACK)));
+        // Build timestamp spans with optional skipping
+        let mut spans = build_timestamp_spans(timestamp, skip_date, skip_timezone);
         spans.push(Span::raw(" "));
         
         // {filename:line} - braces gray, filename hashed color, line number matches log level
@@ -665,6 +728,11 @@ fn colorize_log_line(line: &str) -> Line<'static> {
         // Fallback: unformatted line (plain text)
         Line::raw(line.to_string())
     }
+}
+
+// Wrapper function for backward compatibility (no skipping)
+fn colorize_log_line(line: &str) -> Line<'static> {
+    colorize_log_line_with_options(line, None, None)
 }
 
 // Get color style for log level
@@ -782,5 +850,125 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, "cec849a302e3");
         assert!(result[0].1.starts_with("*** Found local files:"));
+    }
+    
+    #[test]
+    fn test_extract_date_and_timezone() {
+        // Standard format with positive timezone
+        let line = "[2025-12-02T04:00:02.468+0900] {taskinstance.py:1157} INFO - Dependencies all met";
+        let result = extract_date_and_timezone(line);
+        assert_eq!(result, Some(("2025-12-02".to_string(), "+0900".to_string())));
+        
+        // Different timezone (negative)
+        let line2 = "[2025-12-02T14:30:45.123-0500] {local_task_job_runner.py:123} INFO - Test";
+        let result2 = extract_date_and_timezone(line2);
+        assert_eq!(result2, Some(("2025-12-02".to_string(), "-0500".to_string())));
+        
+        // UTC timezone
+        let line3 = "[2025-10-12T01:24:16.754+0000] {local_task_job_runner.py:123} INFO - UTC test";
+        let result3 = extract_date_and_timezone(line3);
+        assert_eq!(result3, Some(("2025-10-12".to_string(), "+0000".to_string())));
+        
+        // Malformed line
+        let line4 = "Not a log line";
+        let result4 = extract_date_and_timezone(line4);
+        assert_eq!(result4, None);
+    }
+    
+    #[test]
+    fn test_colorize_log_line_with_skip() {
+        let line = "[2025-12-02T04:00:02.468+0900] {taskinstance.py:1157} INFO - Test message";
+        
+        // Without skipping - should have more spans
+        let full = colorize_log_line(line);
+        
+        // With skipping date and timezone - should have fewer spans
+        let shortened = colorize_log_line_with_options(line, Some("2025-12-02"), Some("+0900"));
+        
+        // Shortened version should have fewer spans (no date, no T separator, no timezone)
+        assert!(shortened.spans.len() < full.spans.len());
+    }
+    
+    #[test]
+    fn test_colorize_with_partial_skip_date_only() {
+        // Test skipping only date, not timezone
+        let line = "[2025-12-02T04:00:02.468+0900] {taskinstance.py:1157} INFO - Test";
+        
+        let full = colorize_log_line(line);
+        let partial = colorize_log_line_with_options(line, Some("2025-12-02"), None);
+        
+        // Should skip date but still show timezone
+        // partial should have fewer spans than full but more than if both were skipped
+        assert!(partial.spans.len() < full.spans.len());
+        
+        let both_skipped = colorize_log_line_with_options(line, Some("2025-12-02"), Some("+0900"));
+        assert!(partial.spans.len() > both_skipped.spans.len());
+    }
+    
+    #[test]
+    fn test_colorize_with_partial_skip_timezone_only() {
+        // Test skipping only timezone, not date
+        let line = "[2025-12-02T04:00:02.468+0900] {taskinstance.py:1157} INFO - Test";
+        
+        let full = colorize_log_line(line);
+        let partial = colorize_log_line_with_options(line, None, Some("+0900"));
+        
+        // Should skip timezone but still show date
+        assert!(partial.spans.len() < full.spans.len());
+        
+        let both_skipped = colorize_log_line_with_options(line, Some("2025-12-02"), Some("+0900"));
+        assert!(partial.spans.len() > both_skipped.spans.len());
+    }
+    
+    #[test]
+    fn test_colorize_with_mismatched_skip_values() {
+        // Test that skip values must match exactly to trigger skipping
+        let line = "[2025-12-02T04:00:02.468+0900] {taskinstance.py:1157} INFO - Test";
+        
+        let full = colorize_log_line(line);
+        
+        // Wrong date - should not skip
+        let wrong_date = colorize_log_line_with_options(line, Some("2025-12-03"), Some("+0900"));
+        assert_eq!(wrong_date.spans.len(), full.spans.len());
+        
+        // Wrong timezone - should not skip
+        let wrong_tz = colorize_log_line_with_options(line, Some("2025-12-02"), Some("-0500"));
+        assert_eq!(wrong_tz.spans.len(), full.spans.len());
+    }
+    
+    #[test]
+    fn test_extract_date_from_lines_with_headers() {
+        // Test that extraction skips non-matching header lines
+        let lines = vec![
+            "*** Found local files:",
+            "***   * /opt/airflow/logs/dag_id=test/run_id=manual__2025-12-04/task_id=my_task/attempt=1.log",
+            "[2025-12-04T10:30:45.123+0900] {taskinstance.py:1157} INFO - Starting task execution",
+            "[2025-12-04T10:30:46.456+0900] {taskinstance.py:1158} INFO - Task running",
+        ];
+        
+        // Should extract from the first line that matches the log format (line 3)
+        let result = extract_date_and_timezone(lines[2]);
+        assert_eq!(result, Some(("2025-12-04".to_string(), "+0900".to_string())));
+        
+        // Header lines should return None
+        assert_eq!(extract_date_and_timezone(lines[0]), None);
+        assert_eq!(extract_date_and_timezone(lines[1]), None);
+    }
+    
+    #[test]
+    fn test_extract_date_from_empty_content() {
+        // Test that empty content returns None gracefully
+        let empty_line = "";
+        let result = extract_date_and_timezone(empty_line);
+        assert_eq!(result, None);
+    }
+    
+    #[test]
+    fn test_colorize_empty_line() {
+        // Test that empty lines are handled gracefully
+        let empty = "";
+        let colored = colorize_log_line(empty);
+        // Should fall back to raw text (1 span)
+        assert_eq!(colored.spans.len(), 1);
     }
 }
