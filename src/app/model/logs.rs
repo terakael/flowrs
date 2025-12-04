@@ -35,6 +35,51 @@ const LRU_CACHE_SIZE: usize = 5;          // Number of recently viewed attempts 
 const VIRTUAL_SCROLL_BUFFER: usize = 100; // Lines to render beyond visible viewport
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// Log level enum for filtering logs by minimum severity
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LogLevel {
+    Debug = 1,
+    Info = 2,
+    Warning = 3,
+    Error = 4,
+    Critical = 5,
+}
+
+impl std::str::FromStr for LogLevel {
+    type Err = ();
+    
+    /// Parse log level from string (case-insensitive)
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_uppercase().as_str() {
+            "DEBUG" => Ok(LogLevel::Debug),
+            "INFO" => Ok(LogLevel::Info),
+            "WARNING" => Ok(LogLevel::Warning),
+            "ERROR" => Ok(LogLevel::Error),
+            "CRITICAL" => Ok(LogLevel::Critical),
+            _ => Err(()),
+        }
+    }
+}
+
+impl std::fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LogLevel::Debug => write!(f, "DEBUG"),
+            LogLevel::Info => write!(f, "INFO"),
+            LogLevel::Warning => write!(f, "WARNING"),
+            LogLevel::Error => write!(f, "ERROR"),
+            LogLevel::Critical => write!(f, "CRITICAL"),
+        }
+    }
+}
+
+impl LogLevel {
+    /// Get number key for this level (1-5)
+    fn key_number(&self) -> u8 {
+        *self as u8
+    }
+}
+
 pub struct LogModel {
     pub dag_id: Option<String>,
     pub dag_run_id: Option<String>,
@@ -46,6 +91,7 @@ pub struct LogModel {
     pub is_loading_initial: bool,         // Loading initial chunk (show spinner)
     pub lru_cache: VecDeque<u16>,         // Last 5 viewed attempts
     pub error_popup: Option<ErrorPopup>,
+    pub min_log_level: LogLevel,          // Minimum log level to display
     ticks: u32,
     vertical_scroll: usize,
     vertical_scroll_state: ScrollbarState,
@@ -56,6 +102,8 @@ pub struct LogModel {
     event_buffer: Vec<FlowrsEvent>,       // Buffer for 'gg' detection
     cached_log_date: Option<String>,      // CACHE: Extracted date from first log line
     cached_log_timezone: Option<String>,  // CACHE: Extracted timezone from first log line
+    cached_filtered_lines: Vec<(usize, String)>, // CACHE: Filtered lines with original indices
+    cached_filter_level: LogLevel,        // CACHE: Log level used for filtering
 }
 
 impl LogModel {
@@ -71,6 +119,7 @@ impl LogModel {
             is_loading_initial: false,
             lru_cache: VecDeque::new(),
             error_popup: None,
+            min_log_level: LogLevel::Info,  // Default to INFO
             ticks: 0,
             vertical_scroll: 0,
             vertical_scroll_state: ScrollbarState::default(),
@@ -81,6 +130,8 @@ impl LogModel {
             event_buffer: Vec::new(),
             cached_log_date: None,
             cached_log_timezone: None,
+            cached_filtered_lines: Vec::new(),
+            cached_filter_level: LogLevel::Info,
         }
     }
     
@@ -112,6 +163,7 @@ impl LogModel {
         self.cached_log_timezone = None;
         self.cached_lines.clear();
         self.cached_content_hash = 0;
+        self.cached_filtered_lines.clear();
     }
     
     /// Reset state when switching to a new task
@@ -125,6 +177,7 @@ impl LogModel {
         self.clear_render_cache();
         self.update_lru(task_try);
         self.is_loading_initial = true;
+        self.min_log_level = LogLevel::Info;  // Reset to INFO when switching tasks
     }
     
     /// Build the top title line with semantic colors for each component:
@@ -171,17 +224,56 @@ impl LogModel {
         Line::from(title_spans)
     }
     
-    /// Build the bottom title with line count and loading status
-    fn build_bottom_title(&self, total_lines: usize, log_data: &TaskLog) -> String {
+    /// Build the bottom title with line count, loading status, and log level selector
+    fn build_bottom_title(&self, total_lines: usize, log_data: &TaskLog) -> Line<'static> {
         let frame = SPINNER_FRAMES[self.ticks as usize % SPINNER_FRAMES.len()];
         
-        if self.is_loading_more {
+        let mut spans = Vec::new();
+        
+        // Line count and loading status
+        let status_text = if self.is_loading_more {
             format!("{} lines ({} loading more...)", total_lines, frame)
         } else if log_data.has_more() {
             format!("{} lines (press 'm' for more)", total_lines)
         } else {
             format!("{} lines", total_lines)
+        };
+        
+        spans.push(Span::raw(status_text));
+        spans.push(Span::raw(" - "));
+        spans.push(Span::styled("Level: ", Style::default().fg(Color::DarkGray)));
+        
+        // Add log level selectors with colors
+        // Gray out levels below threshold, show full color for threshold and above
+        let levels = [
+            (LogLevel::Debug, BLUE),
+            (LogLevel::Info, GREEN),
+            (LogLevel::Warning, YELLOW),
+            (LogLevel::Error, RED),
+            (LogLevel::Critical, RED),
+        ];
+        
+        for (idx, (level, color)) in levels.iter().enumerate() {
+            if idx > 0 {
+                spans.push(Span::raw(" "));
+            }
+            
+            // Gray out if below threshold, show full color if at or above threshold
+            let is_visible = *level >= self.min_log_level;
+            let level_color = if is_visible { *color } else { Color::DarkGray };
+            let level_style = if *level == LogLevel::Critical && is_visible {
+                Style::default().fg(level_color).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(level_color)
+            };
+            
+            spans.push(Span::styled(
+                format!("[{}]{}", level.key_number(), level),
+                level_style,
+            ));
         }
+        
+        Line::from(spans)
     }
 }
 
@@ -366,6 +458,19 @@ impl Model for LogModel {
                             }
                         }
                     }
+                    KeyCode::Char(c @ '1'..='5') => {
+                        // Set log level based on key (1=DEBUG, 2=INFO, 3=WARNING, 4=ERROR, 5=CRITICAL)
+                        self.min_log_level = match c {
+                            '1' => LogLevel::Debug,
+                            '2' => LogLevel::Info,
+                            '3' => LogLevel::Warning,
+                            '4' => LogLevel::Error,
+                            '5' => LogLevel::Critical,
+                            _ => unreachable!(),
+                        };
+                        self.vertical_scroll = 0;  // Reset scroll when changing filter
+                        return (None, vec![]);
+                    }
 
                     _ => return (Some(FlowrsEvent::Key(*key)), vec![]), // if no match, return the event
                 }
@@ -450,7 +555,15 @@ impl Widget for &mut LogModel {
             log::debug!("LOG CACHE HIT - Using {} cached lines", self.cached_lines.len());
         }
         
-        let all_lines = &self.cached_lines;
+        // Apply log level filtering if needed (with caching)
+        if self.cached_filter_level != self.min_log_level || self.cached_filtered_lines.is_empty() {
+            log::debug!("LOG FILTER - Filtering {} lines at level {:?}", self.cached_lines.len(), self.min_log_level);
+            self.cached_filtered_lines = filter_lines_by_level(&self.cached_lines, self.min_log_level);
+            self.cached_filter_level = self.min_log_level;
+            log::debug!("LOG FILTER - Filtered to {} lines", self.cached_filtered_lines.len());
+        }
+        
+        let all_lines = &self.cached_filtered_lines;
         let total_lines = all_lines.len();
         
         // VIRTUAL SCROLLING: Only build Line objects for visible window + buffer
@@ -468,8 +581,17 @@ impl Widget for &mut LogModel {
             let skip_date = self.cached_log_date.as_deref();
             let skip_timezone = self.cached_log_timezone.as_deref();
             
-            for line in &all_lines[start_line..end_line] {
-                content.push_line(colorize_log_line_with_options(line, skip_date, skip_timezone));
+            // Track the last log level seen for coloring continuation lines
+            let mut last_log_level: Option<String> = None;
+            
+            for (_original_idx, line) in &all_lines[start_line..end_line] {
+                let colored_line = colorize_log_line_with_context(
+                    line, 
+                    skip_date, 
+                    skip_timezone, 
+                    &mut last_log_level
+                );
+                content.push_line(colored_line);
             }
         }
         
@@ -587,6 +709,52 @@ fn extract_date_and_timezone(line: &str) -> Option<(String, String)> {
     None
 }
 
+/// Extract log level from a log line
+/// Example: "[2025-12-02T04:00:02.468+0900] {taskinstance.py:1157} INFO - ..." -> Some(LogLevel::Info)
+fn extract_log_level(line: &str) -> Option<LogLevel> {
+    let re = get_log_line_regex();
+    if let Some(captures) = re.captures(line) {
+        let level_str = &captures[3];
+        return level_str.parse().ok();
+    }
+    None
+}
+
+/// Check if a line is a log line start (begins with timestamp) vs a continuation line
+fn is_log_line_start(line: &str) -> bool {
+    line.starts_with('[')
+}
+
+/// Filter lines by minimum log level, keeping continuation lines with their parent
+/// Returns vector of (original_index, line) tuples
+fn filter_lines_by_level(lines: &[String], min_level: LogLevel) -> Vec<(usize, String)> {
+    let mut filtered = Vec::new();
+    let mut last_level_met_threshold = true;  // Default to true for lines before first log line
+    
+    for (idx, line) in lines.iter().enumerate() {
+        if is_log_line_start(line) {
+            // This is a log line start - check its level
+            if let Some(level) = extract_log_level(line) {
+                last_level_met_threshold = level >= min_level;
+                if last_level_met_threshold {
+                    filtered.push((idx, line.clone()));
+                }
+            } else {
+                // Malformed log line or non-standard format - include by default
+                last_level_met_threshold = true;
+                filtered.push((idx, line.clone()));
+            }
+        } else {
+            // Continuation line - include if parent log line met threshold
+            if last_level_met_threshold {
+                filtered.push((idx, line.clone()));
+            }
+        }
+    }
+    
+    filtered
+}
+
 // Build timestamp spans with optional skipping of date/timezone components
 fn build_timestamp_spans(
     timestamp: &str,
@@ -612,9 +780,9 @@ fn build_timestamp_spans(
         }
     }
     
-    // Add time part (HH:MM:SS) in YELLOW for easy scanning
+    // Add time part (HH:MM:SS) in CYAN (distinct from log level colors)
     if !time_part.is_empty() {
-        spans.push(Span::styled(time_part.to_string(), Style::default().fg(YELLOW)));
+        spans.push(Span::styled(time_part.to_string(), Style::default().fg(CYAN)));
     }
     
     // Add milliseconds in GRAY (de-emphasized as requested)
@@ -683,7 +851,13 @@ fn parse_timestamp(timestamp: &str) -> (&str, &str, &str, &str, &str) {
 
 // Colorize a single log line based on Airflow log format
 // If skip_date and skip_timezone are Some, those components will be omitted from the timestamp
-fn colorize_log_line_with_options(line: &str, skip_date: Option<&str>, skip_timezone: Option<&str>) -> Line<'static> {
+// Tracks last_log_level to style continuation lines consistently
+fn colorize_log_line_with_context(
+    line: &str, 
+    skip_date: Option<&str>, 
+    skip_timezone: Option<&str>,
+    last_log_level: &mut Option<String>
+) -> Line<'static> {
     let re = get_log_line_regex();
     
     if let Some(captures) = re.captures(line) {
@@ -691,6 +865,9 @@ fn colorize_log_line_with_options(line: &str, skip_date: Option<&str>, skip_time
         let source = &captures[2];
         let level = &captures[3];
         let message = &captures[4];
+        
+        // Update last log level for continuation lines (store as String)
+        *last_log_level = Some(level.to_string());
         
         // Parse source into filename and line number
         let (filename, line_num) = parse_source_location(source);
@@ -707,27 +884,40 @@ fn colorize_log_line_with_options(line: &str, skip_date: Option<&str>, skip_time
         spans.push(Span::styled("{".to_string(), Style::default().fg(BRIGHT_BLACK)));
         spans.push(Span::styled(filename.to_string(), Style::default().fg(filename_color)));
         
-        // Add line number if present - color matches log level for visual coordination
+        // Add line number if present - CYAN to match timestamp
         if !line_num.is_empty() {
             spans.push(Span::styled(":".to_string(), Style::default().fg(BRIGHT_BLACK)));
-            spans.push(Span::styled(line_num.to_string(), level_style));
+            spans.push(Span::styled(line_num.to_string(), Style::default().fg(CYAN)));
         }
         
         spans.extend(vec![
             Span::styled("}".to_string(), Style::default().fg(BRIGHT_BLACK)),
             Span::raw(" "),
             // LEVEL - colored by severity
-            Span::styled(level.to_string(), get_level_style(level)),
-            // - message
+            Span::styled(level.to_string(), level_style),
+            // - message (colored by log level)
             Span::styled(" - ".to_string(), Style::default().fg(BRIGHT_BLACK)),
-            Span::styled(message.to_string(), Style::default().fg(FOREGROUND)),
+            Span::styled(message.to_string(), level_style),
         ]);
         
         Line::from(spans)
     } else {
-        // Fallback: unformatted line (plain text)
-        Line::raw(line.to_string())
+        // Continuation line - style based on the parent log line's level
+        if let Some(level) = last_log_level {
+            let level_style = get_level_style(&level);
+            Line::from(vec![Span::styled(line.to_string(), level_style)])
+        } else {
+            // Fallback: unformatted line before any proper log line (e.g., headers)
+            Line::raw(line.to_string())
+        }
     }
+}
+
+// Colorize a single log line based on Airflow log format
+// If skip_date and skip_timezone are Some, those components will be omitted from the timestamp
+fn colorize_log_line_with_options(line: &str, skip_date: Option<&str>, skip_timezone: Option<&str>) -> Line<'static> {
+    let mut dummy_context = None;
+    colorize_log_line_with_context(line, skip_date, skip_timezone, &mut dummy_context)
 }
 
 // Wrapper function for backward compatibility (no skipping)
@@ -970,5 +1160,177 @@ mod tests {
         let colored = colorize_log_line(empty);
         // Should fall back to raw text (1 span)
         assert_eq!(colored.spans.len(), 1);
+    }
+    
+    #[test]
+    fn test_log_level_from_str() {
+        assert_eq!("DEBUG".parse::<LogLevel>(), Ok(LogLevel::Debug));
+        assert_eq!("debug".parse::<LogLevel>(), Ok(LogLevel::Debug));
+        assert_eq!("INFO".parse::<LogLevel>(), Ok(LogLevel::Info));
+        assert_eq!("WARNING".parse::<LogLevel>(), Ok(LogLevel::Warning));
+        assert_eq!("ERROR".parse::<LogLevel>(), Ok(LogLevel::Error));
+        assert_eq!("CRITICAL".parse::<LogLevel>(), Ok(LogLevel::Critical));
+        assert!("UNKNOWN".parse::<LogLevel>().is_err());
+    }
+    
+    #[test]
+    fn test_log_level_ordering() {
+        assert!(LogLevel::Debug < LogLevel::Info);
+        assert!(LogLevel::Info < LogLevel::Warning);
+        assert!(LogLevel::Warning < LogLevel::Error);
+        assert!(LogLevel::Error < LogLevel::Critical);
+        assert!(LogLevel::Critical >= LogLevel::Error);
+    }
+    
+    #[test]
+    fn test_extract_log_level() {
+        let line = "[2025-12-02T04:00:02.468+0900] {taskinstance.py:1157} INFO - Test message";
+        assert_eq!(extract_log_level(line), Some(LogLevel::Info));
+        
+        let line2 = "[2025-12-02T04:00:02.468+0900] {taskinstance.py:1157} ERROR - Test error";
+        assert_eq!(extract_log_level(line2), Some(LogLevel::Error));
+        
+        let malformed = "Not a log line";
+        assert_eq!(extract_log_level(malformed), None);
+    }
+    
+    #[test]
+    fn test_is_log_line_start() {
+        assert!(is_log_line_start("[2025-12-02T04:00:02.468+0900] {taskinstance.py:1157} INFO - Test"));
+        assert!(!is_log_line_start("    This is a continuation line"));
+        assert!(!is_log_line_start("Another continuation"));
+    }
+    
+    #[test]
+    fn test_filter_lines_by_level_basic() {
+        let lines = vec![
+            "[2025-12-02T04:00:02.468+0900] {taskinstance.py:1157} DEBUG - Debug message".to_string(),
+            "[2025-12-02T04:00:03.468+0900] {taskinstance.py:1158} INFO - Info message".to_string(),
+            "[2025-12-02T04:00:04.468+0900] {taskinstance.py:1159} WARNING - Warning message".to_string(),
+            "[2025-12-02T04:00:05.468+0900] {taskinstance.py:1160} ERROR - Error message".to_string(),
+        ];
+        
+        // Filter at INFO level - should exclude DEBUG
+        let filtered = filter_lines_by_level(&lines, LogLevel::Info);
+        assert_eq!(filtered.len(), 3);
+        assert!(filtered[0].1.contains("INFO"));
+        assert!(filtered[1].1.contains("WARNING"));
+        assert!(filtered[2].1.contains("ERROR"));
+        
+        // Filter at WARNING level - should exclude DEBUG and INFO
+        let filtered = filter_lines_by_level(&lines, LogLevel::Warning);
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered[0].1.contains("WARNING"));
+        assert!(filtered[1].1.contains("ERROR"));
+        
+        // Filter at ERROR level - should only include ERROR
+        let filtered = filter_lines_by_level(&lines, LogLevel::Error);
+        assert_eq!(filtered.len(), 1);
+        assert!(filtered[0].1.contains("ERROR"));
+    }
+    
+    #[test]
+    fn test_filter_lines_with_continuations() {
+        let lines = vec![
+            "[2025-12-02T04:00:02.468+0900] {taskinstance.py:1157} DEBUG - Debug message".to_string(),
+            "    This is a continuation of debug".to_string(),
+            "    Another continuation".to_string(),
+            "[2025-12-02T04:00:03.468+0900] {taskinstance.py:1158} INFO - Info message".to_string(),
+            "    Info continuation line 1".to_string(),
+            "    Info continuation line 2".to_string(),
+            "[2025-12-02T04:00:04.468+0900] {taskinstance.py:1159} ERROR - Error message".to_string(),
+            "    Error continuation".to_string(),
+        ];
+        
+        // Filter at INFO level - should exclude DEBUG and its continuations
+        let filtered = filter_lines_by_level(&lines, LogLevel::Info);
+        assert_eq!(filtered.len(), 5); // INFO + 2 continuations + ERROR + 1 continuation
+        assert!(filtered[0].1.contains("INFO"));
+        assert!(filtered[1].1.contains("Info continuation line 1"));
+        assert!(filtered[2].1.contains("Info continuation line 2"));
+        assert!(filtered[3].1.contains("ERROR"));
+        assert!(filtered[4].1.contains("Error continuation"));
+        
+        // Filter at ERROR level - should only include ERROR and its continuation
+        let filtered = filter_lines_by_level(&lines, LogLevel::Error);
+        assert_eq!(filtered.len(), 2); // ERROR + 1 continuation
+        assert!(filtered[0].1.contains("ERROR"));
+        assert!(filtered[1].1.contains("Error continuation"));
+    }
+    
+    #[test]
+    fn test_filter_lines_with_malformed() {
+        let lines = vec![
+            "*** Found local files:".to_string(),
+            "***   * /opt/airflow/logs/dag_id=test/".to_string(),
+            "[2025-12-02T04:00:02.468+0900] {taskinstance.py:1157} INFO - Info message".to_string(),
+            "    Continuation".to_string(),
+        ];
+        
+        // Malformed lines at the start should be included
+        let filtered = filter_lines_by_level(&lines, LogLevel::Info);
+        assert_eq!(filtered.len(), 4); // All lines included (malformed treated as meeting threshold)
+    }
+    
+    #[test]
+    fn test_filter_lines_preserves_indices() {
+        let lines = vec![
+            "[2025-12-02T04:00:02.468+0900] {taskinstance.py:1157} DEBUG - Debug".to_string(),
+            "[2025-12-02T04:00:03.468+0900] {taskinstance.py:1158} INFO - Info".to_string(),
+            "[2025-12-02T04:00:04.468+0900] {taskinstance.py:1159} ERROR - Error".to_string(),
+        ];
+        
+        // Filter at INFO level
+        let filtered = filter_lines_by_level(&lines, LogLevel::Info);
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[0].0, 1); // Original index of INFO line
+        assert_eq!(filtered[1].0, 2); // Original index of ERROR line
+    }
+    
+    #[test]
+    fn test_colorize_with_context_multiple_continuations() {
+        use ratatui::style::Color;
+        
+        let mut context = None;
+        
+        // First log line - INFO level
+        let line1 = "[2025-12-02T04:00:02.468+0900] {taskinstance.py:1157} INFO - Start";
+        let _colored1 = colorize_log_line_with_context(line1, None, None, &mut context);
+        assert!(context.is_some());
+        assert_eq!(context.as_ref().unwrap(), "INFO");
+        
+        // First continuation - should use INFO style (GREEN)
+        let line2 = "    Continuation 1";
+        let colored2 = colorize_log_line_with_context(line2, None, None, &mut context);
+        assert_eq!(colored2.spans.len(), 1);
+        assert_eq!(colored2.spans[0].style.fg, Some(GREEN)); // INFO color
+        
+        // Second continuation - should still use INFO style
+        let line3 = "    Continuation 2";
+        let colored3 = colorize_log_line_with_context(line3, None, None, &mut context);
+        assert_eq!(colored3.spans.len(), 1);
+        assert_eq!(colored3.spans[0].style.fg, Some(GREEN));
+        
+        // New log line - ERROR level
+        let line4 = "[2025-12-02T04:00:03.468+0900] {taskinstance.py:1158} ERROR - Error";
+        let _colored4 = colorize_log_line_with_context(line4, None, None, &mut context);
+        assert_eq!(context.as_ref().unwrap(), "ERROR");
+        
+        // Continuation of ERROR - should use ERROR style (RED)
+        let line5 = "    Error continuation";
+        let colored5 = colorize_log_line_with_context(line5, None, None, &mut context);
+        assert_eq!(colored5.spans.len(), 1);
+        assert_eq!(colored5.spans[0].style.fg, Some(RED)); // ERROR color
+        
+        // WARNING level
+        let line6 = "[2025-12-02T04:00:04.468+0900] {taskinstance.py:1159} WARNING - Warning";
+        let _colored6 = colorize_log_line_with_context(line6, None, None, &mut context);
+        assert_eq!(context.as_ref().unwrap(), "WARNING");
+        
+        // Continuation of WARNING - should use WARNING style (YELLOW)
+        let line7 = "    Warning continuation";
+        let colored7 = colorize_log_line_with_context(line7, None, None, &mut context);
+        assert_eq!(colored7.spans.len(), 1);
+        assert_eq!(colored7.spans[0].style.fg, Some(YELLOW)); // WARNING color
     }
 }
