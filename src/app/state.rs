@@ -107,6 +107,7 @@ impl App {
         // Clear view models but not environment_state
         // This clears UI state (filters, selections) but data persists in environment_state
         self.dags.all.clear();
+        self.dags.loading_status = crate::app::model::dags::LoadingStatus::NotStarted;
         self.dagruns.all.clear();
         self.task_instances.all.clear();
         self.logs.current_log_data = None;
