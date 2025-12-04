@@ -1136,11 +1136,11 @@ impl DagModel {
                         // Extract single line from result
                         let line = lines.pop().unwrap_or_else(|| Line::from(""));
                         
-                        // If not JSON, style as gray text
+                        // If not JSON, use default foreground color
                         if !is_json {
                             Line::from(Span::styled(
                                 line.spans.into_iter().map(|s| s.content.to_string()).collect::<String>(),
-                                Style::default().fg(Color::DarkGray)
+                                Style::default().fg(Color::Reset)
                             ))
                         } else {
                             line
