@@ -407,6 +407,8 @@ impl Widget for &mut TaskInstanceModel {
                     "queued" => AirflowStateColor::Queued,
                     "up_for_retry" => AirflowStateColor::UpForRetry,
                     "upstream_failed" => AirflowStateColor::UpstreamFailed,
+                    "skipped" => AirflowStateColor::Skipped,
+                    "removed" => AirflowStateColor::Removed,
                     _ => AirflowStateColor::None,
                 };
                 (state.clone(), color.into())

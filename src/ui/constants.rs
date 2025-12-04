@@ -84,6 +84,7 @@ pub enum AirflowStateColor {
     UpForRetry,
     UpForReschedule,
     Skipped,
+    Removed,
     UpstreamFailed,
     None,
 }
@@ -97,7 +98,8 @@ impl From<AirflowStateColor> for Color {
             AirflowStateColor::Queued => BRIGHT_BLACK,
             AirflowStateColor::UpForRetry => YELLOW,
             AirflowStateColor::UpForReschedule => CYAN,
-            AirflowStateColor::Skipped => MAGENTA,
+            AirflowStateColor::Skipped => BRIGHT_MAGENTA,
+            AirflowStateColor::Removed => BRIGHT_BLACK,
             AirflowStateColor::UpstreamFailed => BRIGHT_YELLOW,
             AirflowStateColor::None => Color::Reset,
         }
