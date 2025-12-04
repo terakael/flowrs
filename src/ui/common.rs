@@ -294,11 +294,111 @@ fn truncate_str(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// Sanitize text for safe terminal display by removing control characters
+/// 
+/// Removes ASCII control characters that can cause rendering artifacts and scrolling issues.
+/// Preserves newlines for multi-line display. Use this for detail views and multi-line text.
+/// 
+/// Removes:
+/// - Tabs (\t)
+/// - Carriage returns (\r)
+/// - Other ASCII control characters (0x00-0x1F except \n)
+/// 
+/// Preserves:
+/// - Newlines (\n)
+/// - All Unicode characters (international text, emojis, etc.)
+/// 
+/// # Arguments
+/// * `text` - The text to sanitize
+/// 
+/// # Returns
+/// * Sanitized string safe for terminal display with newlines preserved
+/// 
+/// # Example
+/// ```
+/// let input = "line1\ttest\nline2\rwith\ttabs";
+/// let output = sanitize_for_display(input);
+/// assert_eq!(output, "line1test\nline2withtabs");
+/// ```
+pub fn sanitize_for_display(text: &str) -> String {
+    sanitize_control_chars(text, true)
+}
+
+/// Sanitize text for single-line display by removing control characters
+/// 
+/// Removes ASCII control characters including newlines. Use this for table cells
+/// and single-line display contexts where newlines should become spaces.
+/// 
+/// Removes:
+/// - Tabs (\t)
+/// - Carriage returns (\r)
+/// - Newlines (\n) - replaced with spaces
+/// - Other ASCII control characters (0x00-0x1F)
+/// 
+/// Preserves:
+/// - All Unicode characters (international text, emojis, etc.)
+/// 
+/// # Arguments
+/// * `text` - The text to sanitize
+/// 
+/// # Returns
+/// * Sanitized single-line string safe for terminal display
+/// 
+/// # Example
+/// ```
+/// let input = "line1\ttest\nline2\rwith\ttabs";
+/// let output = sanitize_for_inline_display(input);
+/// assert_eq!(output, "line1test line2withtabs");
+/// ```
+pub fn sanitize_for_inline_display(text: &str) -> String {
+    sanitize_control_chars(text, false)
+}
+
+/// Internal sanitization implementation
+/// 
+/// This function is critical for proper display in both table views and detail views.
+/// Without sanitization, control characters can cause:
+/// - Visual artifacts in table rows
+/// - Incorrect line wrapping calculations
+/// - Scrolling position misalignment
+/// - Corrupted terminal buffer state
+/// 
+/// # Arguments
+/// * `text` - The text to sanitize
+/// * `preserve_newlines` - If true, keeps \n; if false, replaces with space
+/// 
+/// # Returns
+/// * Sanitized string safe for terminal display
+fn sanitize_control_chars(text: &str, preserve_newlines: bool) -> String {
+    text.chars()
+        .filter_map(|c| {
+            // Keep regular characters (>= 0x20) and extended ASCII/Unicode
+            if c >= ' ' {
+                Some(c)
+            // Handle newlines based on parameter
+            } else if c == '\n' {
+                if preserve_newlines {
+                    Some('\n')
+                } else {
+                    Some(' ')
+                }
+            // Strip all other ASCII control characters (0x00-0x1F)
+            // This includes: \t, \r, \x00-\x08, \x0B, \x0C, \x0E-\x1F
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// Format and highlight JSON with optional minification
 /// 
 /// This helper consolidates JSON parsing, formatting, and highlighting logic
 /// used across table and detail views. It handles both valid and invalid JSON,
 /// providing appropriate fallbacks.
+/// 
+/// Control characters in the input are sanitized before processing to prevent
+/// display artifacts and scrolling issues.
 /// 
 /// # Arguments
 /// * `value` - The string value to process
@@ -312,7 +412,16 @@ pub fn format_and_highlight_json(
     minify: bool,
     max_chars: Option<usize>,
 ) -> (Vec<Line<'static>>, bool) {
-    if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(value) {
+    // Sanitize control characters FIRST to prevent display issues
+    // For minified view: replace newlines with spaces (single-line display)
+    // For formatted view: preserve newlines for proper multi-line display
+    let sanitized = if minify {
+        sanitize_for_inline_display(value)
+    } else {
+        sanitize_for_display(value)
+    };
+    
+    if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&sanitized) {
         // Valid JSON - format according to preferences
         let json_str = if minify {
             serde_json::to_string(&json_value)
@@ -338,18 +447,11 @@ pub fn format_and_highlight_json(
         
         (lines, true)
     } else {
-        // Not valid JSON - display as plain text
-        let cleaned = if minify {
-            // For table view: clean up whitespace
-            value.replace('\n', " ").replace('\r', "")
-        } else {
-            value.to_string()
-        };
-        
+        // Not valid JSON - display as plain text (already sanitized)
         let display_str = if let Some(max) = max_chars {
-            truncate_str(&cleaned, max)
+            truncate_str(&sanitized, max)
         } else {
-            cleaned
+            sanitized
         };
         
         let lines = if minify {
@@ -492,4 +594,125 @@ pub fn highlight_json(json_str: &str) -> Vec<Line<'static>> {
 /// * Vector of Spans with colorized JSON
 pub fn highlight_json_inline(json_str: &str) -> Vec<Span<'static>> {
     colorize_json_line(json_str)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_tabs() {
+        let input = "hello\tworld";
+        let result = sanitize_control_chars(input, true);
+        assert_eq!(result, "helloworld", "Tabs should be stripped");
+    }
+
+    #[test]
+    fn test_sanitize_carriage_returns() {
+        let input = "line1\r\nline2\r\nline3";
+        let result = sanitize_control_chars(input, true);
+        assert_eq!(result, "line1\nline2\nline3", "CR should be stripped, LF preserved");
+    }
+
+    #[test]
+    fn test_sanitize_carriage_returns_no_newlines() {
+        let input = "line1\r\nline2\r\nline3";
+        let result = sanitize_control_chars(input, false);
+        assert_eq!(result, "line1 line2 line3", "CR and LF should become spaces");
+    }
+
+    #[test]
+    fn test_sanitize_mixed_control_chars() {
+        // Include various control characters: \t, \r, \x00, \x01, \x0C (form feed)
+        let input = "hello\tworld\r\ntest\x00data\x01more\x0Cstuff";
+        let result = sanitize_control_chars(input, true);
+        assert_eq!(result, "helloworld\ntestdatamorestuff", "All control chars except LF stripped");
+    }
+
+    #[test]
+    fn test_sanitize_preserve_newlines() {
+        let input = "line1\nline2\nline3";
+        let result = sanitize_control_chars(input, true);
+        assert_eq!(result, "line1\nline2\nline3", "Newlines should be preserved");
+    }
+
+    #[test]
+    fn test_sanitize_replace_newlines() {
+        let input = "line1\nline2\nline3";
+        let result = sanitize_control_chars(input, false);
+        assert_eq!(result, "line1 line2 line3", "Newlines should become spaces");
+    }
+
+    #[test]
+    fn test_sanitize_no_control_chars() {
+        let input = "hello world 123";
+        let result = sanitize_control_chars(input, true);
+        assert_eq!(result, "hello world 123", "Regular text should be unchanged");
+    }
+
+    #[test]
+    fn test_sanitize_empty_string() {
+        let input = "";
+        let result = sanitize_control_chars(input, true);
+        assert_eq!(result, "", "Empty string should remain empty");
+    }
+
+    #[test]
+    fn test_sanitize_only_control_chars() {
+        let input = "\t\r\n\x00\x01";
+        let result = sanitize_control_chars(input, true);
+        assert_eq!(result, "\n", "Only newline should remain");
+    }
+
+    #[test]
+    fn test_sanitize_unicode_preserved() {
+        let input = "hello 世界 🌍 test";
+        let result = sanitize_control_chars(input, true);
+        assert_eq!(result, "hello 世界 🌍 test", "Unicode should be preserved");
+    }
+
+    #[test]
+    fn test_format_and_highlight_json_with_tabs() {
+        // Simulate the real-world case: Valid JSON with tabs and \r\n
+        let input = "[\r\n\t{\r\n\t\t\"key\": \"value\"\r\n\t}\r\n]";
+        let (lines, is_json) = format_and_highlight_json(input, true, None);
+        
+        // Should be sanitized and parsed as JSON (becomes valid after sanitization)
+        assert!(is_json, "Should be recognized as JSON after sanitization");
+        assert_eq!(lines.len(), 1, "Minified should be single line");
+        
+        // The rendered output should not contain control characters
+        let rendered = lines[0].spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+        assert!(!rendered.contains('\t'), "Rendered output should not contain tabs");
+        assert!(!rendered.contains('\r'), "Rendered output should not contain CR");
+    }
+
+    #[test]
+    fn test_format_and_highlight_json_non_json_with_tabs() {
+        // Non-JSON text with tabs
+        let input = "hello\tworld\ttest";
+        let (lines, is_json) = format_and_highlight_json(input, true, None);
+        
+        assert!(!is_json, "Should not be recognized as JSON");
+        assert_eq!(lines.len(), 1, "Should be single line");
+        
+        let rendered = lines[0].spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+        assert_eq!(rendered, "helloworldtest", "Tabs should be stripped");
+    }
+
+    #[test]
+    fn test_format_and_highlight_json_multiline_with_tabs() {
+        let input = "line1\ttest\nline2\twith\ttabs";
+        let (lines, is_json) = format_and_highlight_json(input, false, None);
+        
+        assert!(!is_json, "Should not be JSON");
+        assert_eq!(lines.len(), 2, "Should be 2 lines");
+        
+        // Check each line has tabs stripped
+        let line1 = lines[0].spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+        let line2 = lines[1].spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+        
+        assert_eq!(line1, "line1test", "First line should have tabs stripped");
+        assert_eq!(line2, "line2withtabs", "Second line should have tabs stripped");
+    }
 }
