@@ -797,10 +797,17 @@ impl Widget for &mut DagRunModel {
                 DEFAULT_STYLE
             };
 
+            // Get DAG display name for the title
+            let title = if let Some(dag) = &self.dag_details {
+                dag.dag_display_name.as_ref().unwrap_or(&dag.dag_id).clone()
+            } else {
+                "Info".to_string()
+            };
+
             let info_block = Block::default()
                 .border_type(BorderType::Rounded)
                 .borders(Borders::ALL)
-                .title("Info")
+                .title(title)
                 .border_style(border_style)
                 .style(DEFAULT_STYLE)
                 .title_style(DEFAULT_STYLE.add_modifier(Modifier::BOLD));
@@ -953,38 +960,7 @@ impl Widget for &mut DagRunModel {
 fn format_dag_info(dag: &crate::airflow::model::common::Dag) -> Vec<Line<'static>> {
     let mut lines = vec![];
     
-    // DAG Name
-    let display_name = dag.dag_display_name.as_ref().unwrap_or(&dag.dag_id);
-    lines.push(Line::from(vec![
-        Span::styled("DAG: ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::raw(display_name.to_string()),
-    ]));
-    
-    // Owners
-    if !dag.owners.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("Owners: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(dag.owners.join(", ")),
-        ]));
-    }
-    
-    // Schedule
-    if let Some(schedule) = &dag.timetable_description {
-        lines.push(Line::from(vec![
-            Span::styled("Schedule: ", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(schedule.to_string()),
-        ]));
-    }
-    
-    // Empty line separator
-    lines.push(Line::from(""));
-    
-    // Documentation
-    lines.push(Line::from(Span::styled(
-        "Documentation:",
-        Style::default().add_modifier(Modifier::BOLD).add_modifier(Modifier::UNDERLINED),
-    )));
-    
+    // Only show the raw doc_md content
     if let Some(doc_md) = &dag.doc_md {
         if doc_md.trim().is_empty() {
             lines.push(Line::from(Span::styled(
