@@ -156,22 +156,68 @@ pub fn highlight_search_text<'a>(text: &'a str, search: Option<&str>, base_color
 /// Format duration from start and end dates to human-readable format
 /// 
 /// Returns formats like "2h 15m 30s", "5m 45s", or "30s" depending on magnitude.
-/// Returns "Running" if end is None (task still running) or if duration is negative.
+/// For running tasks (end is None), calculates elapsed time from start to current time.
 /// Returns "-" if start is None.
+/// 
+/// # Performance Note
+/// This variant calls `now_utc()` internally. For better performance when formatting
+/// multiple durations in the same render frame, use `format_duration_with_now()` instead
+/// to cache the current time once per frame.
 pub fn format_duration(start_date: Option<time::OffsetDateTime>, end_date: Option<time::OffsetDateTime>) -> String {
+    let now = time::OffsetDateTime::now_utc();
+    format_duration_with_now(start_date, end_date, now)
+}
+
+/// Format duration with a provided "now" timestamp for performance
+/// 
+/// When rendering multiple durations in the same frame, call `now_utc()` once and pass it
+/// to this function to avoid repeated syscalls.
+/// 
+/// # Arguments
+/// * `start_date` - Start time of the duration
+/// * `end_date` - End time of the duration (None if still running)
+/// * `now` - Current time to use for elapsed calculation
+pub fn format_duration_with_now(
+    start_date: Option<time::OffsetDateTime>,
+    end_date: Option<time::OffsetDateTime>,
+    now: time::OffsetDateTime,
+) -> String {
     match (start_date, end_date) {
         (Some(start), Some(end)) => {
             let duration = end - start;
             let total_seconds = duration.whole_seconds();
             
             if total_seconds < 0 {
-                return "Running".to_string();
+                // Data error: end is before start
+                // This indicates a bug in Airflow API or data corruption
+                log::error!(
+                    "Invalid duration: end ({}) < start ({})",
+                    end.format(&time::format_description::well_known::Rfc3339).unwrap_or_else(|_| "Invalid".to_string()),
+                    start.format(&time::format_description::well_known::Rfc3339).unwrap_or_else(|_| "Invalid".to_string())
+                );
+                return "Error".to_string();
             }
             
             format_seconds(total_seconds)
         }
-        (Some(_), None) => "Running".to_string(),
-        _ => "-".to_string(),
+        (Some(start), None) => {
+            // Genuinely running - calculate elapsed time from start to now
+            let elapsed = now - start;
+            let elapsed_seconds = elapsed.whole_seconds();
+            
+            if elapsed_seconds < 0 {
+                // Start date is in the future - also a data error or clock skew
+                log::warn!(
+                    "Start date in future: start ({}), now ({})",
+                    start.format(&time::format_description::well_known::Rfc3339).unwrap_or_else(|_| "Invalid".to_string()),
+                    now.format(&time::format_description::well_known::Rfc3339).unwrap_or_else(|_| "Invalid".to_string())
+                );
+                return "Scheduled".to_string();
+            }
+            
+            format_seconds(elapsed_seconds)
+        }
+        (None, _) => "-".to_string(),
     }
 }
 
@@ -200,6 +246,34 @@ fn format_seconds(total_seconds: i64) -> String {
         format!("{}m {}s", minutes, seconds)
     } else {
         format!("{}s", seconds)
+    }
+}
+
+/// Convert a UTC OffsetDateTime to a timezone specified by offset string
+/// 
+/// # Arguments
+/// * `dt` - The UTC datetime to convert
+/// * `offset_str` - Timezone offset in format "+HH:MM" or "-HH:MM" (e.g., "+09:00", "-05:00")
+/// 
+/// # Returns
+/// * The datetime converted to the specified timezone, or original if offset is invalid
+pub fn convert_to_timezone(dt: time::OffsetDateTime, offset_str: &str) -> time::OffsetDateTime {
+    // Parse offset string like "+09:00" or "-05:00"
+    let parts: Vec<&str> = offset_str.trim_start_matches('+').trim_start_matches('-').split(':').collect();
+    if parts.len() != 2 {
+        return dt; // Invalid format, return as-is
+    }
+    
+    let hours: i8 = parts[0].parse().unwrap_or(0);
+    let minutes: i8 = parts[1].parse().unwrap_or(0);
+    let is_negative = offset_str.starts_with('-');
+    
+    let hours = if is_negative { -hours } else { hours };
+    let minutes = if is_negative { -minutes } else { minutes };
+    
+    match time::UtcOffset::from_hms(hours, minutes, 0) {
+        Ok(offset) => dt.to_offset(offset),
+        Err(_) => dt, // Invalid offset, return as-is
     }
 }
 

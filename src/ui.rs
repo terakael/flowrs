@@ -14,6 +14,21 @@ mod init_screen;
 
 pub const TIME_FORMAT: &str = "[year]-[month]-[day] [hour]:[minute]:[second]";
 
+use std::sync::OnceLock;
+
+/// Cached parsed time format for performance
+/// Parsing the format string on every render is expensive, so we cache it
+static TIME_FORMAT_PARSED: OnceLock<Vec<time::format_description::FormatItem<'static>>> = OnceLock::new();
+
+/// Get the cached parsed TIME_FORMAT
+/// This avoids reparsing the format string on every date rendering
+pub fn get_time_format() -> &'static [time::format_description::FormatItem<'static>] {
+    TIME_FORMAT_PARSED.get_or_init(|| {
+        time::format_description::parse(TIME_FORMAT)
+            .expect("TIME_FORMAT should be valid at compile time")
+    })
+}
+
 pub fn draw_ui(f: &mut Frame, app: &Arc<Mutex<App>>) {
     let mut app = app.lock().unwrap();
     if app.config.show_init_screen && app.startup && app.ticks <= 10 {

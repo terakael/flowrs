@@ -59,6 +59,7 @@ pub struct SortableTable<T> {
     columns: Vec<ColumnInfo>,
     sort_column: Option<usize>,
     sort_direction: SortDirection,
+    default_sort: Option<(usize, SortDirection)>,
 }
 
 impl<T> SortableTable<T> {
@@ -83,6 +84,7 @@ impl<T> SortableTable<T> {
             columns,
             sort_column: None,
             sort_direction: SortDirection::None,
+            default_sort: None,
         }
     }
     
@@ -94,6 +96,16 @@ impl<T> SortableTable<T> {
     /// Get current sort state
     pub fn sort_state(&self) -> Option<(usize, &SortDirection)> {
         self.sort_column.map(|col| (col, &self.sort_direction))
+    }
+    
+    /// Set the default sort for this table
+    /// This will be applied whenever items are added or updated, and restored if user clears sort
+    pub fn set_default_sort(&mut self, column_index: usize, direction: SortDirection) {
+        if column_index < self.columns.len() {
+            self.default_sort = Some((column_index, direction));
+            self.sort_column = Some(column_index);
+            self.sort_direction = direction;
+        }
     }
     
     /// Render headers with sort keys highlighted
@@ -170,10 +182,18 @@ impl<T> SortableTable<T> {
     }
     
     /// Reapply the current sort to items (call this after updating items externally)
+    /// If no manual sort is active, applies the default sort
     pub fn reapply_sort(&mut self)
     where
         T: CustomSort,
     {
+        // If user has cleared sort (sort_column is None), restore default sort
+        if self.sort_column.is_none() {
+            if let Some((col, dir)) = self.default_sort {
+                self.sort_column = Some(col);
+                self.sort_direction = dir;
+            }
+        }
         self.apply_sort();
         self.ensure_valid_selection();
     }

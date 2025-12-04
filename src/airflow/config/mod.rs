@@ -96,7 +96,18 @@ impl Display for ManagedService {
 ///
 /// This configuration is persisted to disk at `~/.flowrs` (or custom path).
 ///
-/// Note: The active environment is not persisted. Users must select an environment
+/// # Date/Time Display
+/// The `timezone_offset` field controls how dates are displayed. Airflow API returns
+/// timestamps in UTC, and this setting converts them to your preferred timezone for display.
+///
+/// Supported values: UTC offset in format "+HH:MM" or "-HH:MM"
+/// Examples: "+09:00" (JST), "-05:00" (EST), "+00:00" (UTC)
+///
+/// Note: DST is not automatically handled. You may need to adjust the offset manually
+/// when daylight saving time changes (e.g., EST "-05:00" vs EDT "-04:00").
+///
+/// # Note on Active Environment
+/// The active environment is not persisted. Users must select an environment
 /// on each startup. This design prevents confusion from stale cached data and ensures
 /// explicit environment awareness when working with multiple Airflow instances.
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -105,12 +116,18 @@ pub struct FlowrsConfig {
     pub managed_services: Option<Vec<ManagedService>>,
     #[serde(default = "default_show_init_screen")]
     pub show_init_screen: bool,
+    #[serde(default = "default_timezone_offset")]
+    pub timezone_offset: String,
     #[serde(skip_serializing)]
     pub path: Option<PathBuf>,
 }
 
 fn default_show_init_screen() -> bool {
     true
+}
+
+fn default_timezone_offset() -> String {
+    "+00:00".to_string() // UTC by default
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -183,6 +200,7 @@ impl FlowrsConfig {
             servers: None,
             managed_services: None,
             show_init_screen: true,
+            timezone_offset: "+00:00".to_string(),
             path: Some(CONFIG_FILE.as_path().to_path_buf()),
         }
     }
@@ -207,6 +225,10 @@ impl FlowrsConfig {
 
     pub fn from_str(config: &str) -> Result<Self> {
         let config: FlowrsConfig = toml::from_str(config)?;
+        
+        // Validate the configuration
+        config.validate()?;
+        
         let num_serves = config.servers.as_ref().map_or(0, std::vec::Vec::len);
         let num_managed = config
             .managed_services
@@ -214,6 +236,94 @@ impl FlowrsConfig {
             .map_or(0, std::vec::Vec::len);
         info!("Loaded config: servers={num_serves}, managed_services={num_managed}");
         Ok(config)
+    }
+    
+    /// Validate the configuration and return detailed errors
+    pub fn validate(&self) -> Result<()> {
+        // Validate timezone offset format
+        Self::validate_timezone_offset(&self.timezone_offset)?;
+        
+        // Validate servers if present
+        if let Some(servers) = &self.servers {
+            for (idx, server) in servers.iter().enumerate() {
+                if server.name.trim().is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "Server #{} has empty name",
+                        idx + 1
+                    ));
+                }
+                if server.endpoint.trim().is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "Server '{}' has empty endpoint",
+                        server.name
+                    ));
+                }
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Validate timezone offset format
+    fn validate_timezone_offset(offset: &str) -> Result<()> {
+        // Check basic format
+        if !offset.starts_with('+') && !offset.starts_with('-') {
+            return Err(anyhow::anyhow!(
+                "Invalid timezone offset format: '{}'. Must start with + or -. Examples: '+09:00', '-05:00', '+00:00'",
+                offset
+            ));
+        }
+        
+        // Parse components
+        let parts: Vec<&str> = offset[1..].split(':').collect();
+        if parts.len() != 2 {
+            return Err(anyhow::anyhow!(
+                "Invalid timezone offset format: '{}'. Expected format: +HH:MM or -HH:MM. Examples: '+09:00', '-05:00'",
+                offset
+            ));
+        }
+        
+        // Validate hours
+        let hours: i8 = parts[0].parse()
+            .map_err(|_| anyhow::anyhow!(
+                "Invalid hours in timezone offset: '{}'. Hours must be a number between -14 and +14",
+                offset
+            ))?;
+        
+        // Validate minutes
+        let minutes: i8 = parts[1].parse()
+            .map_err(|_| anyhow::anyhow!(
+                "Invalid minutes in timezone offset: '{}'. Minutes must be a number between 00 and 59",
+                offset
+            ))?;
+        
+        // Check ranges
+        if hours.abs() > 14 {
+            return Err(anyhow::anyhow!(
+                "Timezone offset hours out of range: '{}'. Hours must be between -14 and +14",
+                offset
+            ));
+        }
+        
+        if minutes.abs() > 59 {
+            return Err(anyhow::anyhow!(
+                "Timezone offset minutes out of range: '{}'. Minutes must be between 00 and 59",
+                offset
+            ));
+        }
+        
+        // Validate with time crate
+        let is_negative = offset.starts_with('-');
+        let hours = if is_negative { -hours } else { hours };
+        let minutes = if is_negative { -minutes } else { minutes };
+        
+        time::UtcOffset::from_hms(hours, minutes, 0)
+            .map_err(|_| anyhow::anyhow!(
+                "Invalid timezone offset: '{}'. The time crate rejected this offset",
+                offset
+            ))?;
+        
+        Ok(())
     }
 
     fn extend_servers<I>(&mut self, new_servers: I)
@@ -368,6 +478,7 @@ password = "airflow"
             }]),
             managed_services: Some(vec![ManagedService::Conveyor]),
             show_init_screen: true,
+            timezone_offset: "+00:00".to_string(),
             path: None,
         };
 
@@ -446,6 +557,7 @@ password = "airflow"
             }]),
             managed_services: None,
             show_init_screen: true,
+            timezone_offset: "+00:00".to_string(),
             path: None,
         };
 

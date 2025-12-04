@@ -26,9 +26,18 @@ impl RunCommand {
 
         // Read config file
         let path = self.file.as_ref().map(PathBuf::from);
-        let (config, errors) = FlowrsConfig::from_file(path.as_ref())?
-            .expand_managed_services()
-            .await?;
+        let (config, mut errors) = match FlowrsConfig::from_file(path.as_ref()) {
+            Ok(config) => {
+                // Config loaded successfully, expand managed services
+                config.expand_managed_services().await?
+            }
+            Err(e) => {
+                // Config validation failed - show error popup but continue with defaults
+                let default_config = FlowrsConfig::new();
+                let validation_error = format!("Configuration Error:\n\n{}", e);
+                (default_config, vec![validation_error])
+            }
+        };
 
         // setup terminal (includes panic hooks) and run app
         let mut terminal = ratatui::init();

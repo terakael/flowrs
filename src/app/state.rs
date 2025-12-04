@@ -50,12 +50,20 @@ impl App {
 
     pub fn new_with_errors(config: FlowrsConfig, errors: Vec<String>) -> Self {
         let servers = &config.clone().servers.unwrap_or_default();
+        let timezone_offset = config.timezone_offset.clone();
+        
+        let mut dags = DagModel::new();
+        dags.timezone_offset = timezone_offset.clone();
+        
+        let mut dagruns = DagRunModel::new();
+        dagruns.timezone_offset = timezone_offset;
+        
         App {
             config,
             environment_state: EnvironmentStateContainer::new(),
-            dags: DagModel::new(),
+            dags,
             configs: ConfigModel::new_with_errors(servers.clone(), errors),
-            dagruns: DagRunModel::new(),
+            dagruns,
             task_instances: TaskInstanceModel::new(),
             logs: LogModel::new(),
             variable_detail: VariableDetailModel::new(),

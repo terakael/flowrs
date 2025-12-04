@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 use log::debug;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Borders, Clear, Paragraph, Row, Scrollbar, ScrollbarOrientation,
@@ -12,13 +12,12 @@ use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 use syntect_tui::into_span;
-use time::format_description;
 
 use crate::airflow::model::common::DagRun;
 use crate::app::events::custom::FlowrsEvent;
-use crate::ui::common::format_duration;
+use crate::ui::common::{convert_to_timezone, format_duration_with_now};
 use crate::ui::constants::{AirflowStateColor, ALTERNATING_ROW_COLOR, DEFAULT_STATE_ICON, DEFAULT_STYLE, HEADER_STYLE, MARKED_COLOR, RED, RUNNING_STATE_ICON};
-use crate::ui::TIME_FORMAT;
+use crate::ui::get_time_format;
 
 use super::popup::commands_help::CommandPopUp;
 use super::popup::dagruns::commands::create_dagrun_command_popup;
@@ -176,6 +175,7 @@ pub struct DagRunModel {
     pub current_page: usize,
     pub page_size: usize,
     pub total_entries: i64,  // Total DAG runs available from API
+    pub timezone_offset: String,  // Format: "+09:00" or "-05:00"
     ticks: u32,
     event_buffer: Vec<FlowrsEvent>,
 }
@@ -185,6 +185,9 @@ impl DagRunModel {
         let headers = ["State", "DAG Run ID", "Logical Date", "Duration"];
         // Reserved keys: j/k (scroll), g/G (jump), K/J (focus), m (mark), c (clear), t (trigger), o (open), ? (help), / (filter)
         let reserved = &['j', 'k', 'g', 'G', 'K', 'J', 'm', 'c', 't', 'o', '?', '/'];
+        let mut filtered = SortableTable::new(&headers, vec![], reserved);
+        // Set default sort to Logical Date (column index 2) descending
+        filtered.set_default_sort(2, super::sortable_table::SortDirection::Descending);
         DagRunModel {
             dag_id: None,
             dag_details: None,
@@ -192,7 +195,7 @@ impl DagRunModel {
             dag_code: DagCodeWidget::default(),
             focused_section: DagRunFocusedSection::DagRunsTable,
             all: vec![],
-            filtered: SortableTable::new(&headers, vec![], reserved),
+            filtered,
             filter: Filter::new(),
             marked: vec![],
             popup: None,
@@ -201,6 +204,7 @@ impl DagRunModel {
             current_page: 0,
             page_size: 20,
             total_entries: 0,
+            timezone_offset: "+00:00".to_string(),
             ticks: 0,
             event_buffer: vec![],
         }
@@ -212,7 +216,7 @@ impl DagRunModel {
 
     pub fn filter_dag_runs_with_reset(&mut self, reset_page: bool) {
         let prefix = &self.filter.prefix;
-        let mut filtered_dag_runs = match prefix {
+        let filtered_dag_runs = match prefix {
             Some(prefix) => self
                 .all
                 .iter()
@@ -221,10 +225,8 @@ impl DagRunModel {
                 .collect::<Vec<DagRun>>(),
             None => self.all.clone(),
         };
-        // Sort by start_date in descending order (most recent first) - default sort
-        filtered_dag_runs.sort_by(|a, b| b.start_date.cmp(&a.start_date));
         self.filtered.items = filtered_dag_runs;
-        // Reapply current sort if any
+        // Apply the default sort (or current sort if user has changed it)
         self.filtered.reapply_sort();
         
         if reset_page {
@@ -658,6 +660,9 @@ impl Model for DagRunModel {
 
 impl Widget for &mut DagRunModel {
     fn render(self, area: Rect, buf: &mut ratatui::prelude::Buffer) {
+        // Cache current time once per render frame for performance
+        let now = time::OffsetDateTime::now_utc();
+        
         // Handle filter at bottom if enabled
         let base_area = if self.filter.is_enabled() {
             let rects = Layout::default()
@@ -747,13 +752,14 @@ impl Widget for &mut DagRunModel {
                     Style::default().add_modifier(Modifier::BOLD),
                 )),
                 Line::from(if let Some(date) = item.logical_date {
-                    date.format(&format_description::parse(TIME_FORMAT).unwrap())
-                        .unwrap()
-                        .clone()
+                    // Convert from UTC to configured timezone and format
+                    let local_date = convert_to_timezone(date, &self.timezone_offset);
+                    local_date.format(get_time_format())
+                        .unwrap_or_else(|_| "Invalid date".to_string())
                 } else {
                     "None".to_string()
                 }),
-                Line::from(format_duration(item.start_date, item.end_date)),
+                Line::from(format_duration_with_now(item.start_date, item.end_date, now)),
             ])
             .style(if self.marked.contains(&actual_idx) {
                 DEFAULT_STYLE.bg(MARKED_COLOR)

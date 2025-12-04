@@ -165,6 +165,9 @@ pub struct DagModel {
     // Import errors tab data
     pub filtered_import_errors: SortableTable<ImportError>,
     
+    // Display settings
+    pub timezone_offset: String,  // Format: "+09:00" or "-05:00"
+    
     // State preservation for detail views
     pub saved_tab: Option<DagPanelTab>,
     pub saved_variable_selection: Option<usize>,
@@ -185,42 +188,35 @@ impl DagModel {
         // p (pause toggle), o (open), r (refresh), ? (help), / (filter)
         let reserved = &['j', 'k', 'g', 'G', 'h', 'l', 'p', 'o', 'r', '?', '/'];
         
+        let dag_headers = ["State", "Name", "Schedule", "Next Run", "Tags"];
+        let var_headers = ["Key", "Value"];
+        let conn_headers = ["ID", "Type", "Host", "Login", "Schema", "Port"];
+        let import_error_headers = ["DAG Name", "Error"];
+        
         DagModel {
-            // Tab state - start on DAGs tab
             active_tab: DagPanelTab::Dags,
-            
-            // DAG tab data
             all: vec![],
             recent_runs: HashMap::new(),
-            filtered: SortableTable::new(&["State", "Name", "Schedule", "Next Run", "Tags"], vec![], reserved),
+            filtered: SortableTable::new(&dag_headers, vec![], reserved),
             filter: Filter::new(),
-            show_paused: false,
+            show_paused: true,
             import_error_list: vec![],
-            
-            // Variables tab data
             all_variables: vec![],
-            filtered_variables: SortableTable::new(&["Key", "Value (Preview)"], vec![], reserved),
+            filtered_variables: SortableTable::new(&var_headers, vec![], reserved),
             selected_variable: None,
-            
-            // Connections tab data
             all_connections: vec![],
-            filtered_connections: SortableTable::new(&["ID", "Type", "Host", "Login", "Schema", "Port"], vec![], reserved),
+            filtered_connections: SortableTable::new(&conn_headers, vec![], reserved),
             selected_connection: None,
-            
-            // Import errors tab data
-            filtered_import_errors: SortableTable::new(&["DAG Name", "Error"], vec![], reserved),
-            
-            // State preservation for detail views
+            filtered_import_errors: SortableTable::new(&import_error_headers, vec![], reserved),
+            timezone_offset: "+00:00".to_string(),
             saved_tab: None,
             saved_variable_selection: None,
             saved_connection_selection: None,
             saved_import_error_selection: None,
-            
-            // Shared UI state
             loading_status: LoadingStatus::NotStarted,
-            ticks: 0,
             commands: None,
             error_popup: None,
+            ticks: 0,
             event_buffer: vec![],
         }
     }
