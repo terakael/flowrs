@@ -196,14 +196,12 @@ impl LogModel {
         // "Logs" label in yellow
         title_spans.push(Span::styled("Logs".to_string(), Style::default().fg(YELLOW)));
         
-        // Try info (if multiple tries)
-        if total_tries > 1 {
-            title_spans.push(Span::styled(" - ".to_string(), Style::default().fg(CYAN)));
-            title_spans.push(Span::styled(
-                format!("Try {}/{}", self.current_attempt, total_tries),
-                Style::default().fg(GREEN)
-            ));
-        }
+        // Try info (always show)
+        title_spans.push(Span::styled(" - ".to_string(), Style::default().fg(CYAN)));
+        title_spans.push(Span::styled(
+            format!("Try {}/{}", self.current_attempt, total_tries),
+            Style::default().fg(GREEN)
+        ));
         
         // Date and timezone
         if let (Some(date), Some(tz)) = (&self.cached_log_date, &self.cached_log_timezone) {
@@ -237,15 +235,12 @@ impl LogModel {
         // Line count and loading status
         let status_text = if self.is_loading_more {
             format!("{} lines ({} loading more...)", total_lines, frame)
-        } else if log_data.has_more() {
-            format!("{} lines (press 'm' for more)", total_lines)
         } else {
             format!("{} lines", total_lines)
         };
         
         spans.push(Span::raw(status_text));
         spans.push(Span::raw(" - "));
-        spans.push(Span::styled("Level: ", Style::default().fg(Color::DarkGray)));
         
         // Add log level selectors with colors
         // Gray out levels below threshold, show full color for threshold and above
