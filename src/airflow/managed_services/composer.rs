@@ -1,11 +1,41 @@
 use crate::airflow::config::{AirflowAuth, AirflowConfig, AirflowVersion, ManagedService};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use gcp_auth::TokenProvider;
 use log::info;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
+
+/// Creates a detailed error message for GCP session expiration issues
+///
+/// This helper provides consistent, actionable guidance when GCP authentication fails,
+/// typically due to Google Workspace session control policies requiring periodic reauthentication.
+fn create_session_expired_error(context: &str, original_error: impl std::fmt::Display) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{}\n\
+        \n\
+        This usually happens when your Google Workspace session has expired.\n\
+        Your organization's administrator has configured session length policies\n\
+        that require periodic reauthentication.\n\
+        \n\
+        To fix this issue, try one of the following:\n\
+        \n\
+        1. Re-authenticate (recommended for local development):\n\
+           gcloud auth application-default login\n\
+        \n\
+        2. Use a service account (recommended for production/frequent use):\n\
+           - Request a service account key from your GCP administrator\n\
+           - Set: export GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json\n\
+           - Service accounts are not subject to session expiration\n\
+        \n\
+        3. Request longer session duration from your Google Workspace admin:\n\
+           - Ask them to increase the session length in Google Workspace settings\n\
+           - This may still require daily login depending on policy\n\
+        \n\
+        Original error: {}", context, original_error
+    )
+}
 
 /// Google Cloud Composer client for managing authentication
 #[derive(Clone)]
@@ -27,10 +57,16 @@ impl ComposerClient {
     /// - Service account key files (via GOOGLE_APPLICATION_CREDENTIALS)
     /// - gcloud auth application-default login
     /// - Default service accounts on GCE/Cloud Run/Cloud Functions
+    ///
+    /// # Session Expiration
+    /// When using user credentials (from `gcloud auth application-default login`),
+    /// your Google Workspace administrator may have configured session length policies
+    /// that require periodic reauthentication (typically daily). This is expected
+    /// security behavior for corporate accounts.
     pub async fn new() -> Result<Self> {
         let token_provider = gcp_auth::provider()
             .await
-            .context("Failed to create GCP token provider")?;
+            .map_err(|e| create_session_expired_error("Failed to create GCP token provider.", e))?;
 
         Ok(Self {
             token_provider,
@@ -39,13 +75,23 @@ impl ComposerClient {
 
     /// Gets a fresh access token for authenticating to Cloud Composer
     /// The token is automatically refreshed if expired
+    ///
+    /// # Session Expiration
+    /// If your Google Workspace session has expired, this will fail and require
+    /// reauthentication. This typically happens daily for corporate accounts with
+    /// session control policies enabled.
     pub async fn get_token(&self) -> Result<String> {
         // Get token with cloud-platform scope
         let scopes = &["https://www.googleapis.com/auth/cloud-platform"];
         let token = self.token_provider
             .token(scopes)
             .await
-            .context("Failed to get GCP access token")?;
+            .map_err(|e| {
+                // TODO: Inspect error type/message to distinguish session expiration from other failures
+                // (e.g., network issues, permission problems, malformed credentials).
+                // Currently assumes session expiration as it's the most common case for corporate users.
+                create_session_expired_error("Your GCP session has expired.", e)
+            })?;
 
         Ok(token.as_str().to_string())
     }
@@ -77,6 +123,11 @@ impl ComposerAuth {
     }
 
     /// Gets the client, initializing it if necessary
+    ///
+    /// # Lazy Initialization
+    /// The client is created on first use to avoid authentication during config
+    /// deserialization. If credentials have expired since the last use, this will
+    /// fail and require reauthentication.
     pub async fn get_client(&self) -> Result<&ComposerClient> {
         self.client
             .get_or_try_init(|| async { ComposerClient::new().await })

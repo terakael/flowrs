@@ -47,15 +47,23 @@ impl Widget for &ErrorPopup {
 
         let mut text = Text::default();
         for (idx, error) in self.errors.iter().enumerate() {
-            text.push_line(Line::from(vec![
-                Span::styled(
-                    format!("Error {}: ", idx + 1),
-                    Style::default()
-                        .fg(Color::Red)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(error.as_str(), Style::default().fg(Color::White)),
-            ]));
+            // Add error number header
+            text.push_line(Line::from(vec![Span::styled(
+                format!("Error {}: ", idx + 1),
+                Style::default()
+                    .fg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
+            )]));
+            
+            // Split error message by newlines to preserve formatting
+            for line in error.lines() {
+                text.push_line(Line::from(Span::styled(
+                    line,
+                    Style::default().fg(Color::White),
+                )));
+            }
+            
+            // Add spacing between multiple errors
             if idx < self.errors.len() - 1 {
                 text.push_line(Line::from(""));
             }
