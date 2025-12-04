@@ -825,7 +825,7 @@ impl Model for DagModel {
                                             // Save state before navigating to detail view
                                             self.save_state_before_detail_view();
                                             return (
-                                                Some(FlowrsEvent::Key(*key_event)),
+                                                None,
                                                 vec![WorkerMessage::GetVariableDetail { key }],
                                             );
                                         }
@@ -842,7 +842,7 @@ impl Model for DagModel {
                                             // Save state before navigating to detail view
                                             self.save_state_before_detail_view();
                                             return (
-                                                Some(FlowrsEvent::Key(*key_event)),
+                                                None,
                                                 vec![WorkerMessage::GetConnectionDetail { connection_id }],
                                             );
                                         }
@@ -859,7 +859,7 @@ impl Model for DagModel {
                                                 // Save state before navigating to detail view
                                                 self.save_state_before_detail_view();
                                                 return (
-                                                    Some(FlowrsEvent::Key(*key_event)),
+                                                    None,
                                                     vec![WorkerMessage::GetImportErrorDetail { import_error_id }],
                                                 );
                                             }
