@@ -5,7 +5,7 @@ use crate::airflow::model::common::Dag;
 
 use super::model::popup::error::ErrorPopup;
 use super::model::popup::taskinstances::mark::MarkState as taskMarkState;
-use super::{model::popup::dagruns::mark::MarkState, state::App};
+use super::{model::popup::dagruns::mark::MarkState, state::{App, Panel}};
 use anyhow::Result;
 use futures::future::join_all;
 use log::debug;
@@ -949,37 +949,7 @@ impl Worker {
             }
 
             WorkerMessage::OpenItem(item) => {
-                // For Config items, look up the endpoint from active_server instead of using the passed string
-                let final_item = if let OpenItem::Config(_) = &item {
-                    let app = self.app.lock().unwrap();
-
-                    let active_server_name = app
-                        .config
-                        .active_server
-                        .as_ref()
-                        .ok_or_else(|| anyhow::anyhow!("No active server configured"))?;
-
-                    let servers = app
-                        .config
-                        .servers
-                        .as_ref()
-                        .ok_or_else(|| anyhow::anyhow!("No servers configured"))?;
-
-                    let server = servers
-                        .iter()
-                        .find(|s| &s.name == active_server_name)
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "Active server '{active_server_name}' not found in configuration"
-                            )
-                        })?;
-
-                    OpenItem::Config(server.endpoint.clone())
-                } else {
-                    item
-                };
-
-                let url = client.build_open_url(&final_item)?;
+                let url = client.build_open_url(&item)?;
                 webbrowser::open(&url).unwrap();
             }
             WorkerMessage::UpdateVariables => {
@@ -1122,7 +1092,9 @@ impl Worker {
         // Set this as the active environment
         app.environment_state
             .set_active_environment(env_name.clone());
-        app.config.active_server = Some(env_name);
+
+        // Reset to Dag panel when switching environments
+        app.active_panel = Panel::Dag;
 
         // Clear the view state but NOT the environment data
         app.clear_state();

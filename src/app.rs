@@ -30,7 +30,6 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: Arc<Mutex<App>
 
         // Clone servers to avoid borrow checker issues
         let servers = app.config.servers.clone();
-        let active_server_name = app.config.active_server.clone();
 
         // Initialize all environments with their clients
         if let Some(servers) = servers {
@@ -46,12 +45,6 @@ pub async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: Arc<Mutex<App>
                     );
                 }
             }
-        }
-
-        // Set the active environment if one was configured
-        if let Some(active_server_name) = active_server_name {
-            app.environment_state
-                .set_active_environment(active_server_name);
         }
     }
 

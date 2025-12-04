@@ -92,11 +92,17 @@ impl Display for ManagedService {
     }
 }
 
+/// Configuration for the Flowrs TUI application.
+///
+/// This configuration is persisted to disk at `~/.flowrs` (or custom path).
+///
+/// Note: The active environment is not persisted. Users must select an environment
+/// on each startup. This design prevents confusion from stale cached data and ensures
+/// explicit environment awareness when working with multiple Airflow instances.
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct FlowrsConfig {
     pub servers: Option<Vec<AirflowConfig>>,
     pub managed_services: Option<Vec<ManagedService>>,
-    pub active_server: Option<String>,
     #[serde(default = "default_show_init_screen")]
     pub show_init_screen: bool,
     #[serde(skip_serializing)]
@@ -169,14 +175,13 @@ impl FlowrsConfig {
     ///
     /// Returns a `FlowrsConfig` with:
     /// - No servers configured
-    /// - No managed services
-    /// - No active server
-    /// - Default config file path
+    /// - No managed services configured
+    /// - Init screen enabled by default
+    /// - Default config file path (`~/.flowrs`)
     pub fn new() -> Self {
         Self {
             servers: None,
             managed_services: None,
-            active_server: None,
             show_init_screen: true,
             path: Some(CONFIG_FILE.as_path().to_path_buf()),
         }
@@ -362,7 +367,6 @@ password = "airflow"
                 proxy: None,
             }]),
             managed_services: Some(vec![ManagedService::Conveyor]),
-            active_server: None,
             show_init_screen: true,
             path: None,
         };
@@ -441,7 +445,6 @@ password = "airflow"
                 proxy: Some("http://proxy.example.com:8080".to_string()),
             }]),
             managed_services: None,
-            active_server: None,
             show_init_screen: true,
             path: None,
         };

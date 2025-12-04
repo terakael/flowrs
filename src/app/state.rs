@@ -50,11 +50,6 @@ impl App {
 
     pub fn new_with_errors(config: FlowrsConfig, errors: Vec<String>) -> Self {
         let servers = &config.clone().servers.unwrap_or_default();
-        let active_server = if let Some(active_server) = &config.active_server {
-            servers.iter().find(|server| server.name == *active_server)
-        } else {
-            None
-        };
         App {
             config,
             environment_state: EnvironmentStateContainer::new(),
@@ -66,10 +61,7 @@ impl App {
             variable_detail: VariableDetailModel::new(),
             connection_detail: ConnectionDetailModel::new(),
             import_error_detail: ImportErrorDetailModel::new(),
-            active_panel: match active_server {
-                Some(_) => Panel::Dag,
-                None => Panel::Config,
-            },
+            active_panel: Panel::Config,
             ticks: 0,
             loading: true,
             startup: true,
@@ -108,6 +100,7 @@ impl App {
         // This clears UI state (filters, selections) but data persists in environment_state
         self.dags.all.clear();
         self.dags.loading_status = crate::app::model::dags::LoadingStatus::NotStarted;
+        self.dags.active_tab = crate::app::model::dags::DagPanelTab::Dags;
         self.dagruns.all.clear();
         self.task_instances.all.clear();
         self.logs.current_log_data = None;
