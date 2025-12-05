@@ -560,11 +560,11 @@ impl Widget for &mut LogModel {
                 // v2 format
                 full_content.lines().map(|s| s.to_string()).collect()
             } else {
-                // v1 format
+                // v1 format - unescape all Python escape sequences
                 let mut lines = Vec::new();
                 for (_, log_fragment) in fragments {
-                    let replaced_log = log_fragment.replace("\\n", "\n");
-                    lines.extend(replaced_log.lines().map(|s| s.to_string()));
+                    let unescaped = unescape_python_string(&log_fragment);
+                    lines.extend(unescaped.lines().map(|s| s.to_string()));
                 }
                 lines
             };
@@ -700,6 +700,38 @@ lazy_regex!(
     r"^\[([^\]]+)\]\s+\{([^}]+)\}\s+(\w+)\s+-\s+(.*)$"
 );
 
+/// Unescape Python string escape sequences using snailquote library.
+///
+/// Handles all Python escape sequences including:
+/// - Basic: \n (newline), \t (tab), \r (carriage return), \\ (backslash)
+/// - Quotes: \' (single quote), \" (double quote)
+/// - Hex: \xNN (2-digit hex)
+/// - Unicode: \uNNNN (4-digit hex), \UNNNNNNNN (8-digit hex)
+///
+/// # Implementation
+/// This function wraps the input with double quotes before passing to snailquote,
+/// which expects a quoted string. The input is assumed to follow Python string
+/// escaping rules (quotes are already escaped), which is guaranteed since it comes
+/// from Python's repr() output via the Airflow API.
+///
+/// # Error Handling
+/// If unescaping fails (e.g., malformed escape sequence), logs a warning and
+/// returns the original string unchanged.
+fn unescape_python_string(s: &str) -> String {
+    // snailquote expects quotes around the string, so we add them temporarily.
+    // SAFETY: This is safe because the input comes from Python's repr() output via
+    // the Airflow API, which always properly escapes quotes based on the chosen
+    // delimiter. The regex pattern (?:\\.|[^'])* also ensures proper extraction.
+    let quoted = format!("\"{}\"", s);
+    match snailquote::unescape(&quoted) {
+        Ok(unescaped) => unescaped,
+        Err(e) => {
+            log::warn!("Failed to unescape string: {}. Using original. Error: {}", s, e);
+            s.to_string()
+        }
+    }
+}
+
 // Log content is a list of tuples of form ('element1', 'element2'), i.e. serialized python tuples
 // The second element can be single or double quoted depending on content
 pub(crate) fn parse_content(content: &str) -> Vec<(String, String)> {
@@ -731,10 +763,10 @@ pub(crate) fn parse_and_unescape_log_content(content: &str) -> String {
         // v2 format - already plain text, no escaping needed
         content.to_string()
     } else {
-        // v1 format - extract log fragments and unescape newlines
+        // v1 format - extract log fragments and unescape all Python escape sequences
         let mut result = String::new();
         for (_, log_fragment) in fragments {
-            let unescaped = log_fragment.replace("\\n", "\n");
+            let unescaped = unescape_python_string(&log_fragment);
             result.push_str(&unescaped);
         }
         result
@@ -999,6 +1031,86 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_unescape_python_string_newlines() {
+        assert_eq!(unescape_python_string("line1\\nline2"), "line1\nline2");
+        assert_eq!(unescape_python_string("hello\\nworld\\n"), "hello\nworld\n");
+    }
+    
+    #[test]
+    fn test_unescape_python_string_tabs() {
+        assert_eq!(unescape_python_string("col1\\tcol2"), "col1\tcol2");
+        assert_eq!(unescape_python_string("\\thello"), "\thello");
+    }
+    
+    #[test]
+    fn test_unescape_python_string_carriage_return() {
+        assert_eq!(unescape_python_string("line1\\rline2"), "line1\rline2");
+    }
+    
+    #[test]
+    fn test_unescape_python_string_quotes() {
+        assert_eq!(unescape_python_string("it\\'s"), "it's");
+        assert_eq!(unescape_python_string("say \\\"hello\\\""), "say \"hello\"");
+    }
+    
+    #[test]
+    fn test_unescape_python_string_backslash() {
+        assert_eq!(unescape_python_string("path\\\\to\\\\file"), "path\\to\\file");
+    }
+    
+    #[test]
+    fn test_unescape_python_string_hex_escape() {
+        assert_eq!(unescape_python_string("\\x41\\x42\\x43"), "ABC");
+        assert_eq!(unescape_python_string("hello\\x20world"), "hello world");
+    }
+    
+    #[test]
+    fn test_unescape_python_string_unicode_escape() {
+        assert_eq!(unescape_python_string("\\u2764"), "❤");
+        assert_eq!(unescape_python_string("\\u03B1\\u03B2\\u03B3"), "αβγ");
+    }
+    
+    #[test]
+    fn test_unescape_python_string_mixed() {
+        let input = "Line 1\\nTab:\\there\\nQuote: \\'test\\'\\nBackslash: \\\\";
+        let expected = "Line 1\nTab:\there\nQuote: 'test'\nBackslash: \\";
+        assert_eq!(unescape_python_string(input), expected);
+    }
+    
+    #[test]
+    fn test_unescape_python_string_real_world() {
+        // Simulate real Airflow log with multiple escape types
+        let input = "*** Found local files:\\n***   * /opt/airflow/logs/dag_id=test\\n[2025-12-02] INFO - Task \\'my_task\\' started";
+        let expected = "*** Found local files:\n***   * /opt/airflow/logs/dag_id=test\n[2025-12-02] INFO - Task 'my_task' started";
+        assert_eq!(unescape_python_string(input), expected);
+    }
+    
+    #[test]
+    fn test_unescape_python_string_malformed_incomplete_escape() {
+        // Test that incomplete escape sequences fall back gracefully
+        let input = "incomplete escape \\";
+        let result = unescape_python_string(input);
+        // Should return original string on error
+        assert_eq!(result, input);
+    }
+    
+    #[test]
+    fn test_unescape_python_string_malformed_invalid_hex() {
+        // Invalid hex escape should fall back
+        let input = "invalid \\xZZ hex";
+        let result = unescape_python_string(input);
+        assert_eq!(result, input);
+    }
+    
+    #[test]
+    fn test_unescape_python_string_malformed_invalid_unicode() {
+        // Invalid unicode escape should fall back
+        let input = "invalid \\uGGGG unicode";
+        let result = unescape_python_string(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
     fn test_parse_content_single_quotes() {
         let content = "[('host1', 'log content here')]";
         let result = parse_content(content);
@@ -1013,10 +1125,34 @@ mod tests {
         let result = parse_content(content);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, "cec849a302e3");
+        // Note: This just parses, doesn't unescape yet - that's done by unescape_python_string
         assert_eq!(
             result[0].1,
             r"*** Found local files:\n***   * /opt/airflow/logs/"
         );
+    }
+    
+    #[test]
+    fn test_parse_and_unescape_log_content_v1() {
+        // Test v1 format with escape sequences
+        let content = r#"[('host1', 'Line 1\nLine 2\tTabbed')]"#;
+        let result = parse_and_unescape_log_content(content);
+        assert_eq!(result, "Line 1\nLine 2\tTabbed");
+    }
+    
+    #[test]
+    fn test_parse_and_unescape_log_content_v2() {
+        // Test v2 format (plain text)
+        let content = "Plain text log\nNo tuples here";
+        let result = parse_and_unescape_log_content(content);
+        assert_eq!(result, content);
+    }
+    
+    #[test]
+    fn test_parse_and_unescape_log_content_with_quotes() {
+        let content = r#"[('host', 'Message: \"Hello\"\nNext line')]"#;
+        let result = parse_and_unescape_log_content(content);
+        assert_eq!(result, "Message: \"Hello\"\nNext line");
     }
 
     #[test]
