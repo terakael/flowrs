@@ -151,6 +151,13 @@ pub enum AirflowAuth {
     Composer(super::managed_services::composer::ComposerAuth),
 }
 
+impl AirflowAuth {
+    /// Checks if this is Composer auth with a keyfile path
+    pub fn is_composer_with_keyfile(&self) -> bool {
+        matches!(self, AirflowAuth::Composer(auth) if auth.uses_keyfile())
+    }
+}
+
 #[derive(Deserialize, Serialize, Clone)]
 pub struct BasicAuth {
     pub username: String,

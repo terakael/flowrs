@@ -1,5 +1,5 @@
 use crate::airflow::config::{AirflowAuth, AirflowConfig, AirflowVersion, ManagedService};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use gcp_auth::TokenProvider;
 use log::info;
 use serde::{Deserialize, Serialize};
@@ -73,6 +73,21 @@ impl ComposerClient {
         })
     }
 
+    /// Creates a new Composer client using a service account keyfile
+    /// This is the recommended approach for production use as it avoids session expiration issues.
+    ///
+    /// # Arguments
+    /// * `keyfile_path` - Path to the service account JSON keyfile
+    pub async fn from_keyfile(keyfile_path: &str) -> Result<Self> {
+        let expanded_path = crate::airflow::config::expand_env_vars(keyfile_path)?;
+        let token_provider = gcp_auth::CustomServiceAccount::from_file(&expanded_path)
+            .with_context(|| format!("Failed to load service account from keyfile: {}", expanded_path))?;
+
+        Ok(Self {
+            token_provider: Arc::new(token_provider),
+        })
+    }
+
     /// Gets a fresh access token for authenticating to Cloud Composer
     /// The token is automatically refreshed if expired
     ///
@@ -89,7 +104,11 @@ impl ComposerClient {
             .map_err(|e| {
                 // TODO: Inspect error type/message to distinguish session expiration from other failures
                 // (e.g., network issues, permission problems, malformed credentials).
-                // Currently assumes session expiration as it's the most common case for corporate users.
+                // The gcp_auth crate doesn't expose structured error types, so we'd need to parse
+                // error messages, which is brittle. For now, we assume session expiration as it's
+                // the most common case for corporate users using ADC.
+                // Consider contributing to gcp_auth to expose structured error types if this becomes
+                // a frequent issue. With keyfile auth, session expiration is not a concern.
                 create_session_expired_error("Your GCP session has expired.", e)
             })?;
 
@@ -102,12 +121,15 @@ impl ComposerClient {
 #[derive(Clone)]
 pub struct ComposerAuth {
     pub client: Arc<OnceCell<ComposerClient>>,
+    /// Optional path to service account keyfile (if not using ADC)
+    pub keyfile_path: Option<String>,
 }
 
 impl fmt::Debug for ComposerAuth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ComposerAuth")
             .field("client", &"<OnceCell<ComposerClient>>")
+            .field("keyfile_path", &self.keyfile_path)
             .finish()
     }
 }
@@ -119,7 +141,31 @@ impl ComposerAuth {
         let _ = cell.set(client);
         Self {
             client: Arc::new(cell),
+            keyfile_path: None,
         }
+    }
+
+    /// Creates a new ComposerAuth with deferred initialization using ADC
+    /// The client will be created on first use with Application Default Credentials
+    pub fn new_deferred() -> Self {
+        Self {
+            client: Arc::new(OnceCell::new()),
+            keyfile_path: None,
+        }
+    }
+
+    /// Creates a new ComposerAuth from a keyfile path
+    /// The client will be created on first use with the specified keyfile
+    pub fn from_keyfile(keyfile_path: String) -> Self {
+        Self {
+            client: Arc::new(OnceCell::new()),
+            keyfile_path: Some(keyfile_path),
+        }
+    }
+
+    /// Checks if this auth uses a keyfile path (vs ADC)
+    pub fn uses_keyfile(&self) -> bool {
+        self.keyfile_path.is_some()
     }
 
     /// Gets the client, initializing it if necessary
@@ -130,20 +176,29 @@ impl ComposerAuth {
     /// fail and require reauthentication.
     pub async fn get_client(&self) -> Result<&ComposerClient> {
         self.client
-            .get_or_try_init(|| async { ComposerClient::new().await })
+            .get_or_try_init(|| async {
+                if let Some(keyfile_path) = &self.keyfile_path {
+                    ComposerClient::from_keyfile(keyfile_path).await
+                } else {
+                    ComposerClient::new().await
+                }
+            })
             .await
     }
 }
 
 // Custom serialization/deserialization for ComposerAuth
-// We serialize as an empty object and recreate the client on demand
+// We serialize the keyfile path if present, and recreate the client on demand
 impl Serialize for ComposerAuth {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-        let state = serializer.serialize_struct("ComposerAuth", 0)?;
+        // Field count: keyfile_path (1 field)
+        const SERIALIZED_FIELD_COUNT: usize = 1;
+        let mut state = serializer.serialize_struct("ComposerAuth", SERIALIZED_FIELD_COUNT)?;
+        state.serialize_field("keyfile_path", &self.keyfile_path)?;
         state.end()
     }
 }
@@ -155,6 +210,12 @@ impl<'de> Deserialize<'de> for ComposerAuth {
     {
         use serde::de::{MapAccess, Visitor};
         
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "snake_case")]
+        enum Field {
+            KeyfilePath,
+        }
+        
         struct ComposerAuthVisitor;
         
         impl<'de> Visitor<'de> for ComposerAuthVisitor {
@@ -164,18 +225,29 @@ impl<'de> Deserialize<'de> for ComposerAuth {
                 formatter.write_str("struct ComposerAuth")
             }
             
-            fn visit_map<V>(self, _map: V) -> Result<ComposerAuth, V::Error>
+            fn visit_map<V>(self, mut map: V) -> Result<ComposerAuth, V::Error>
             where
                 V: MapAccess<'de>,
             {
+                let mut keyfile_path = None;
+                
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::KeyfilePath => {
+                            keyfile_path = map.next_value()?;
+                        }
+                    }
+                }
+                
                 // Don't create the client during deserialization - it will be created on first use
                 Ok(ComposerAuth {
                     client: Arc::new(OnceCell::new()),
+                    keyfile_path,
                 })
             }
         }
         
-        deserializer.deserialize_struct("ComposerAuth", &[], ComposerAuthVisitor)
+        deserializer.deserialize_struct("ComposerAuth", &["keyfile_path"], ComposerAuthVisitor)
     }
 }
 
@@ -192,21 +264,31 @@ pub async fn create_composer_config(
     name: String,
     endpoint: String,
     airflow_version: AirflowVersion,
+    keyfile_path: Option<String>,
 ) -> Result<AirflowConfig> {
-    let client = ComposerClient::new().await?;
-
     // Normalize the endpoint URL
     let normalized_endpoint = crate::airflow::config::normalize_endpoint(endpoint);
 
-    info!(
-        "Created Composer configuration: {} ({})",
-        name, normalized_endpoint
-    );
+    // Both paths use lazy initialization for consistency
+    // Authentication will be validated on first use rather than during config creation
+    let auth = if let Some(keyfile) = keyfile_path {
+        info!(
+            "Created Composer configuration: {} ({}) with keyfile: {}",
+            name, normalized_endpoint, keyfile
+        );
+        AirflowAuth::Composer(ComposerAuth::from_keyfile(keyfile))
+    } else {
+        info!(
+            "Created Composer configuration: {} ({}) with ADC",
+            name, normalized_endpoint
+        );
+        AirflowAuth::Composer(ComposerAuth::new_deferred())
+    };
 
     Ok(AirflowConfig {
         name,
         endpoint: normalized_endpoint,
-        auth: AirflowAuth::Composer(ComposerAuth::new(client)),
+        auth,
         managed: Some(ManagedService::Gcc),
         version: airflow_version,
         proxy: None,
@@ -260,6 +342,7 @@ mod tests {
             "test-composer".to_string(),
             "https://example-airflow-ui.composer.googleusercontent.com".to_string(),
             AirflowVersion::V2,
+            None,
         )
         .await;
 
@@ -287,6 +370,7 @@ mod tests {
             "test".to_string(),
             "example.composer.googleusercontent.com".to_string(),
             AirflowVersion::V2,
+            None,
         )
         .await;
 
@@ -300,6 +384,7 @@ mod tests {
             "test2".to_string(),
             "https://example.composer.googleusercontent.com".to_string(),
             AirflowVersion::V3,
+            None,
         )
         .await;
 

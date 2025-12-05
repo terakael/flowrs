@@ -9,7 +9,7 @@ use crate::{
         AirflowAuth, AirflowConfig, AirflowVersion, BasicAuth, FlowrsConfig, TokenCmd,
     },
     airflow::managed_services::composer,
-    commands::config::model::{prompt_proxy_config, validate_endpoint, ConfigOption},
+    commands::config::model::{prompt_proxy_config, validate_endpoint, validate_keyfile_path, ConfigOption},
 };
 use anyhow::Result;
 
@@ -131,10 +131,30 @@ impl AddCommand {
 
     fn run_composer_add(&self) -> Result<()> {
         println!("\n🌩️  Google Cloud Composer Configuration");
-        println!("   This uses Application Default Credentials (ADC) for authentication.");
-        println!("   Make sure you have set up GCP credentials:");
-        println!("     • Run: gcloud auth application-default login");
-        println!("     • Or set GOOGLE_APPLICATION_CREDENTIALS to a service account key file\n");
+        println!("   Choose your authentication method:");
+        println!("     1. Service account keyfile (recommended - no session expiration)");
+        println!("     2. Application Default Credentials (ADC)\n");
+
+        let auth_method = inquire::Select::new(
+            "authentication method",
+            vec!["Service account keyfile", "Application Default Credentials (ADC)"]
+        ).prompt()?;
+
+        let keyfile_path = if auth_method == "Service account keyfile" {
+            println!("\n📝 Enter the path to your service account keyfile:");
+            println!("   You can use environment variables (e.g., $GOOGLE_APPLICATION_CREDENTIALS)\n");
+            
+            let path = inquire::Text::new("keyfile path")
+                .with_placeholder("$GOOGLE_APPLICATION_CREDENTIALS or /path/to/keyfile.json")
+                .with_validator(validate_keyfile_path)
+                .prompt()?;
+            Some(path)
+        } else {
+            println!("\n   Make sure you have set up GCP credentials:");
+            println!("     • Run: gcloud auth application-default login");
+            println!("     • Or set GOOGLE_APPLICATION_CREDENTIALS environment variable\n");
+            None
+        };
 
         let name = inquire::Text::new("name")
             .with_help_message("A friendly name for this Composer environment")
@@ -157,7 +177,7 @@ impl AddCommand {
         // Create the Composer config using async runtime
         let rt = tokio::runtime::Runtime::new()?;
         let new_config = rt.block_on(async {
-            composer::create_composer_config(name, endpoint, version).await
+            composer::create_composer_config(name, endpoint, version, keyfile_path).await
         })?;
 
         let path = self.file.as_ref().map(PathBuf::from);
@@ -168,6 +188,8 @@ impl AddCommand {
             config.path = Some(user_path);
         }
 
+        let uses_keyfile = new_config.auth.is_composer_with_keyfile();
+        
         if let Some(mut servers) = config.servers.clone() {
             servers.retain(|server| server.name != new_config.name && server.managed.is_none());
             servers.push(new_config);
@@ -179,8 +201,12 @@ impl AddCommand {
         config.write_to_file()?;
 
         println!("✅ Composer config added successfully!");
-        println!("   Note: Composer auth is not persisted to config file.");
-        println!("   Authentication will use ADC each time you run flowrs.");
+        if uses_keyfile {
+            println!("   Using service account keyfile for authentication.");
+        } else {
+            println!("   Using Application Default Credentials (ADC) for authentication.");
+            println!("   Note: ADC may require periodic reauthentication.");
+        }
         Ok(())
     }
 }

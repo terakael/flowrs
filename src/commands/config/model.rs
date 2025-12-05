@@ -94,6 +94,53 @@ pub fn validate_endpoint(
     }
 }
 
+/// Validates a keyfile path for service account authentication.
+/// Checks that the path exists, is a file, and contains valid JSON.
+#[allow(clippy::unnecessary_wraps)]
+pub fn validate_keyfile_path(
+    path: &str,
+) -> Result<Validation, Box<dyn std::error::Error + Send + Sync>> {
+    // Expand environment variables first
+    let expanded = match crate::airflow::config::expand_env_vars(path) {
+        Ok(p) => p,
+        Err(_) => {
+            return Ok(Validation::Invalid(
+                "⚠️ Invalid environment variable in path".into()
+            ));
+        }
+    };
+    
+    // Check if file exists
+    let path_obj = std::path::Path::new(&expanded);
+    if !path_obj.exists() {
+        return Ok(Validation::Invalid(
+            format!("⚠️ File does not exist: {}", expanded).into()
+        ));
+    }
+    
+    // Check if it's a file (not a directory)
+    if !path_obj.is_file() {
+        return Ok(Validation::Invalid(
+            "⚠️ Path must point to a file, not a directory".into()
+        ));
+    }
+    
+    // Check if it's valid JSON (basic validation)
+    if let Ok(contents) = std::fs::read_to_string(path_obj) {
+        if serde_json::from_str::<serde_json::Value>(&contents).is_err() {
+            return Ok(Validation::Invalid(
+                "⚠️ File is not valid JSON".into()
+            ));
+        }
+    } else {
+        return Ok(Validation::Invalid(
+            "⚠️ Cannot read file".into()
+        ));
+    }
+    
+    Ok(Validation::Valid)
+}
+
 /// Prompts the user for proxy configuration.
 /// 
 /// # Arguments
