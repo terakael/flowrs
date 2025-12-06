@@ -46,7 +46,7 @@ If you're self-hosting an Airflow instance, or your favorite managed service is 
 
 ![flowrs config add demo](./vhs/add_config.gif)
 
-This creates an entry in a `~/.flowrs` configuration file. If you have multiple Airflow servers configured, you can easily switch between them in `flowrs` configuration screen.
+This creates an entry in your configuration file. If you have multiple Airflow servers configured, you can easily switch between them in `flowrs` configuration screen.
 
 Only basic authentication and bearer token authentication are supported. When selecting the bearer token option, you can either provide a static token or a command that generates a token.
 
@@ -56,7 +56,7 @@ If your Airflow instance is behind a proxy, `flowrs` supports proxy configuratio
 
 #### Per-Server Proxy Configuration
 
-You can configure a proxy for each Airflow server in your `~/.flowrs` configuration file:
+You can configure a proxy for each Airflow server in your configuration file:
 
 ```toml
 [[servers]]
@@ -99,3 +99,34 @@ flowrs run
 ```toml
 proxy = "http://username:password@proxy.company.com:8080"
 ```
+
+## Configuration and File Locations
+
+Flowrs follows the [XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html) for storing configuration and state files.
+
+### Configuration File
+
+Your Airflow server configurations are stored at:
+
+- **Primary location**: `~/.config/flowrs/config.toml` (or `$XDG_CONFIG_HOME/flowrs/config.toml`)
+- **Legacy location**: `~/.flowrs` (automatically detected for backward compatibility)
+
+Flowrs will use the XDG location (`~/.config/flowrs/config.toml`) if it exists, otherwise it falls back to the legacy location (`~/.flowrs`) if present. New installations automatically use the XDG location.
+
+### Debug Logs
+
+When debug logging is enabled via the `FLOWRS_LOG` environment variable, logs are written to:
+
+- **Log directory**: `~/.local/state/flowrs/logs/` (or `$XDG_STATE_HOME/flowrs/logs/`)
+- **Log files**: `flowrs-debug-YYYYMMDDHHMMSS.log` (timestamped per session)
+
+Example:
+
+```bash
+# Enable debug logging
+FLOWRS_LOG=debug flowrs run
+
+# Logs will be written to: ~/.local/state/flowrs/logs/flowrs-debug-20251206190808.log
+```
+
+Available log levels: `trace`, `debug`, `info`, `warn`, `error`

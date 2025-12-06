@@ -94,7 +94,9 @@ impl Display for ManagedService {
 
 /// Configuration for the Flowrs TUI application.
 ///
-/// This configuration is persisted to disk at `~/.flowrs` (or custom path).
+/// This configuration is persisted to disk at `~/.config/flowrs/config.toml`
+/// (or `$XDG_CONFIG_HOME/flowrs/config.toml`), with fallback to legacy
+/// location `~/.flowrs` for backward compatibility.
 ///
 /// # Date/Time Display
 /// The `timezone_offset` field controls how dates are displayed. Airflow API returns
@@ -392,6 +394,11 @@ impl FlowrsConfig {
             .path
             .clone()
             .unwrap_or(CONFIG_FILE.as_path().to_path_buf());
+        
+        // Create parent directories if they don't exist
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         
         // Set restrictive file permissions on Unix systems (0600 = rw-------)
         #[cfg(unix)]

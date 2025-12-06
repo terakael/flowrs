@@ -51,10 +51,17 @@ impl RunCommand {
 }
 
 fn setup_logging(log_level: &str) -> Result<()> {
-    let log_file = format!(
-        "./flowrs-debug-{}.log",
+    // Get the XDG state directory for logs
+    let log_dir = crate::get_state_dir().join("logs");
+    
+    // Create the log directory if it doesn't exist
+    std::fs::create_dir_all(&log_dir)?;
+    
+    let log_file_path = log_dir.join(format!(
+        "flowrs-debug-{}.log",
         chrono::Local::now().format("%Y%m%d%H%M%S")
-    );
+    ));
+    
     let log_level = match log_level.to_lowercase().as_str() {
         "debug" => LevelFilter::Debug,
         "trace" => LevelFilter::Trace,
@@ -63,6 +70,10 @@ fn setup_logging(log_level: &str) -> Result<()> {
         _ => LevelFilter::Info,
     };
 
-    WriteLogger::init(log_level, Config::default(), File::create(log_file)?)?;
+    WriteLogger::init(log_level, Config::default(), File::create(&log_file_path)?)?;
+    
+    // Log the file location so users know where to find it
+    info!("Logging to: {}", log_file_path.display());
+    
     Ok(())
 }
