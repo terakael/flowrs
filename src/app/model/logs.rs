@@ -33,8 +33,8 @@ use super::popup::logs::commands::create_log_command_popup;
 use super::{Model, handle_vertical_scroll_keys, handle_command_popup_events};
 
 // Constants for log viewer configuration
-const LRU_CACHE_SIZE: usize = 5;          // Number of recently viewed attempts to keep in cache
-const VIRTUAL_SCROLL_BUFFER: usize = 100; // Lines to render beyond visible viewport
+const LRU_CACHE_SIZE: usize = 5;         // Number of recently viewed attempts to keep in cache
+const VIRTUAL_SCROLL_BUFFER: usize = 30; // Lines to render beyond visible viewport (reduced for performance)
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// Log level enum for filtering logs by minimum severity
@@ -116,6 +116,8 @@ pub struct LogModel {
     cached_log_timezone: Option<String>,  // CACHE: Extracted timezone from first log line
     cached_filtered_lines: Vec<(usize, String)>, // CACHE: Filtered lines with original indices
     cached_filter_level: LogLevel,        // CACHE: Log level used for filtering
+    cached_colorized_lines: Vec<Line<'static>>, // CACHE: Pre-colorized lines ready to render
+    cached_colorize_hash: u64,            // CACHE: Hash to detect when colorization needs refresh
     cached_viewport_width: u16,           // CACHE: Viewport width (detect resize)
     cached_visual_line_map: Vec<VisualLineMapping>, // CACHE: Logical→visual mapping
     cached_total_visual_lines: usize,     // CACHE: Total visual lines with wrapping
@@ -147,6 +149,8 @@ impl LogModel {
             cached_log_timezone: None,
             cached_filtered_lines: Vec::new(),
             cached_filter_level: LogLevel::Info,
+            cached_colorized_lines: Vec::new(),
+            cached_colorize_hash: 0,
             cached_viewport_width: 0,        // Will recalculate on first render
             cached_visual_line_map: Vec::new(),
             cached_total_visual_lines: 0,
@@ -182,6 +186,8 @@ impl LogModel {
         self.cached_lines.clear();
         self.cached_content_hash = 0;
         self.cached_filtered_lines.clear();
+        self.cached_colorized_lines.clear();
+        self.cached_colorize_hash = 0;
         self.cached_visual_line_map.clear();
         self.cached_total_visual_lines = 0;
     }
@@ -314,9 +320,10 @@ impl LogModel {
     
     /// Calculate the visual line map for the current filtered lines
     /// This determines how many visual lines each logical line occupies at the given width
+    /// Uses the cached colorized lines to avoid redundant colorization
     /// Returns (visual_line_mappings, total_visual_lines)
     fn calculate_visual_line_map(&self, viewport_width: u16) -> (Vec<VisualLineMapping>, usize) {
-        let mut mappings = Vec::with_capacity(self.cached_filtered_lines.len());
+        let mut mappings = Vec::with_capacity(self.cached_colorized_lines.len());
         let mut current_visual_line = 0;
         
         // Account for borders: 2 chars for left/right borders
@@ -327,19 +334,10 @@ impl LogModel {
             return (mappings, 0);
         }
         
-        for (logical_idx, (_original_idx, line_content)) in 
-            self.cached_filtered_lines.iter().enumerate() 
-        {
-            // Build a temporary Line to calculate wrapping
-            // Don't skip date/timezone for accurate width calculation
-            let colored_line = colorize_log_line_with_options(
-                line_content,
-                None,  // Don't skip date for accurate width calculation
-                None   // Don't skip timezone for accurate width calculation
-            );
-            
+        // Use cached colorized lines to avoid re-colorizing on terminal resize
+        for (logical_idx, colored_line) in self.cached_colorized_lines.iter().enumerate() {
             // Create a temporary Paragraph with wrapping to calculate line count
-            let temp_paragraph = Paragraph::new(colored_line)
+            let temp_paragraph = Paragraph::new(colored_line.clone())
                 .wrap(Wrap { trim: false });
             
             // Use ratatui's built-in line_count() - accounts for unicode, styles, etc.
@@ -707,6 +705,43 @@ impl Widget for &mut LogModel {
             self.cached_filtered_lines = filter_lines_by_level(&self.cached_lines, self.min_log_level);
             self.cached_filter_level = self.min_log_level;
             log::debug!("LOG FILTER - Filtered to {} lines", self.cached_filtered_lines.len());
+            
+            // Invalidate colorized cache when filter changes
+            self.cached_colorized_lines.clear();
+            self.cached_colorize_hash = 0;
+        }
+        
+        // Check if we need to (re)colorize lines
+        let current_hash = calculate_colorize_hash(
+            &self.cached_filtered_lines,
+            self.cached_log_date.as_deref(),
+            self.cached_log_timezone.as_deref()
+        );
+        
+        if self.cached_colorize_hash != current_hash || self.cached_colorized_lines.is_empty() {
+            log::debug!("COLORIZE CACHE - Building cache for {} lines", 
+                self.cached_filtered_lines.len());
+            
+            let skip_date = self.cached_log_date.as_deref();
+            let skip_timezone = self.cached_log_timezone.as_deref();
+            let mut last_log_level: Option<String> = None;
+            
+            self.cached_colorized_lines.clear();
+            self.cached_colorized_lines.reserve(self.cached_filtered_lines.len());
+            
+            for (_original_idx, line) in &self.cached_filtered_lines {
+                let colored_line = colorize_log_line_with_context(
+                    line,
+                    skip_date,
+                    skip_timezone,
+                    &mut last_log_level
+                );
+                self.cached_colorized_lines.push(colored_line);
+            }
+            
+            self.cached_colorize_hash = current_hash;
+            log::debug!("COLORIZE CACHE - Cached {} colorized lines", 
+                self.cached_colorized_lines.len());
         }
         
         // Check if we need to recalculate visual line map (width change, content change, etc.)
@@ -784,21 +819,11 @@ impl Widget for &mut LogModel {
         log::debug!("RENDER - Visual scroll: {}, Visual lines: {}, Logical range: {}-{}, Offset: {}", 
             self.vertical_scroll, total_visual_lines, logical_start, logical_end, paragraph_scroll_offset);
         
-        // Build Text with only visible logical lines (wrapping will happen in Paragraph)
+        // Build Text with pre-colorized lines from cache (no colorization overhead!)
         let mut content = Text::default();
-        if logical_start < logical_end && logical_end <= self.cached_filtered_lines.len() {
-            let skip_date = self.cached_log_date.as_deref();
-            let skip_timezone = self.cached_log_timezone.as_deref();
-            let mut last_log_level: Option<String> = None;
-            
-            for (_original_idx, line) in &self.cached_filtered_lines[logical_start..logical_end] {
-                let colored_line = colorize_log_line_with_context(
-                    line, 
-                    skip_date, 
-                    skip_timezone, 
-                    &mut last_log_level
-                );
-                content.push_line(colored_line);
+        if logical_start < logical_end && logical_end <= self.cached_colorized_lines.len() {
+            for colored_line in &self.cached_colorized_lines[logical_start..logical_end] {
+                content.push_line(colored_line.clone());  // Clone is cheap (Cow<'static, str>)
             }
         }
         
@@ -1011,6 +1036,29 @@ fn filter_lines_by_level(lines: &[String], min_level: LogLevel) -> Vec<(usize, S
     }
     
     filtered
+}
+
+/// Calculate hash for colorize cache invalidation
+/// Changes to filtered lines, date format, or timezone should invalidate the cache
+fn calculate_colorize_hash(
+    filtered_lines: &[(usize, String)],
+    skip_date: Option<&str>,
+    skip_timezone: Option<&str>,
+) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    
+    let mut hasher = DefaultHasher::new();
+    
+    // Hash the entire filtered_lines vector for robust cache invalidation
+    // This ensures any change to filtered content invalidates the cache
+    filtered_lines.hash(&mut hasher);
+    
+    // Hash skip date/timezone (affects colorization output)
+    skip_date.hash(&mut hasher);
+    skip_timezone.hash(&mut hasher);
+    
+    hasher.finish()
 }
 
 // Build timestamp spans with optional skipping of date/timezone components
