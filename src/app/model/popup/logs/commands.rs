@@ -35,11 +35,6 @@ pub static LOG_COMMANDS: LazyLock<Vec<Command<'static>>> = LazyLock::new(|| {
             description: "Jump to the bottom of logs",
         },
         Command {
-            name: "Scroll Horizontally",
-            key_binding: "Shift+H / Shift+L",
-            description: "Scroll left/right for long log lines",
-        },
-        Command {
             name: "Filter by Level",
             key_binding: "1-5",
             description: "Filter logs by minimum level (1=DEBUG, 2=INFO, 3=WARNING, 4=ERROR, 5=CRITICAL)",

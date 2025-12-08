@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::KeyCode;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -6,7 +6,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{
         Block, BorderType, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-        StatefulWidget, Widget,
+        StatefulWidget, Widget, Wrap,
     },
 };
 use regex::Regex;
@@ -82,6 +82,16 @@ impl LogLevel {
     }
 }
 
+/// Helper struct to map logical lines to visual line ranges
+/// Enables accurate scrolling when text wrapping is enabled
+#[derive(Debug, Clone)]
+struct VisualLineMapping {
+    logical_index: usize,   // Index in cached_filtered_lines
+    visual_start: usize,    // First visual line for this logical line
+    visual_end: usize,      // Last visual line + 1 (exclusive range)
+    line_count: usize,      // Number of visual lines (visual_end - visual_start)
+}
+
 pub struct LogModel {
     pub dag_id: Option<String>,
     pub dag_run_id: Option<String>,
@@ -96,10 +106,9 @@ pub struct LogModel {
     pub error_popup: Option<ErrorPopup>,
     pub min_log_level: LogLevel,          // Minimum log level to display
     ticks: u32,
-    vertical_scroll: usize,
+    vertical_scroll: usize,               // VISUAL line offset (not logical line)
     vertical_scroll_state: ScrollbarState,
-    horizontal_scroll: u16,               // Horizontal scroll offset for long lines
-    last_viewport_height: usize,          // Cached from last render for auto-load
+    last_viewport_height: usize,          // Lines visible (excluding borders)
     cached_lines: Vec<String>,            // CACHE: Parsed lines to avoid reparsing every frame
     cached_content_hash: u64,             // Hash to detect when content changes
     event_buffer: Vec<FlowrsEvent>,       // Buffer for 'gg' detection
@@ -107,6 +116,9 @@ pub struct LogModel {
     cached_log_timezone: Option<String>,  // CACHE: Extracted timezone from first log line
     cached_filtered_lines: Vec<(usize, String)>, // CACHE: Filtered lines with original indices
     cached_filter_level: LogLevel,        // CACHE: Log level used for filtering
+    cached_viewport_width: u16,           // CACHE: Viewport width (detect resize)
+    cached_visual_line_map: Vec<VisualLineMapping>, // CACHE: Logical→visual mapping
+    cached_total_visual_lines: usize,     // CACHE: Total visual lines with wrapping
 }
 
 impl LogModel {
@@ -125,10 +137,9 @@ impl LogModel {
             error_popup: None,
             min_log_level: LogLevel::Info,  // Default to INFO
             ticks: 0,
-            vertical_scroll: 0,
+            vertical_scroll: 0,              // Start at top (visual line 0)
             vertical_scroll_state: ScrollbarState::default(),
-            horizontal_scroll: 0,
-            last_viewport_height: 20,  // Default viewport size
+            last_viewport_height: 20,        // Default viewport size
             cached_lines: Vec::new(),
             cached_content_hash: 0,
             event_buffer: Vec::new(),
@@ -136,6 +147,9 @@ impl LogModel {
             cached_log_timezone: None,
             cached_filtered_lines: Vec::new(),
             cached_filter_level: LogLevel::Info,
+            cached_viewport_width: 0,        // Will recalculate on first render
+            cached_visual_line_map: Vec::new(),
+            cached_total_visual_lines: 0,
         }
     }
     
@@ -168,6 +182,8 @@ impl LogModel {
         self.cached_lines.clear();
         self.cached_content_hash = 0;
         self.cached_filtered_lines.clear();
+        self.cached_visual_line_map.clear();
+        self.cached_total_visual_lines = 0;
     }
     
     /// Reset state when switching to a new task
@@ -227,7 +243,7 @@ impl LogModel {
     }
     
     /// Build the bottom title with line count, loading status, and log level selector
-    fn build_bottom_title(&self, total_lines: usize, log_data: &TaskLog) -> Line<'static> {
+    fn build_bottom_title(&self, total_lines: usize, _log_data: &TaskLog) -> Line<'static> {
         let frame = SPINNER_FRAMES[self.ticks as usize % SPINNER_FRAMES.len()];
         
         let mut spans = Vec::new();
@@ -274,6 +290,120 @@ impl LogModel {
         
         Line::from(spans)
     }
+    
+    /// Check if we need to recalculate the visual line map
+    /// Recalculates when: no cached map, width changed, or filter changed
+    fn should_recalculate_visual_map(&self, viewport_width: u16) -> bool {
+        // 1. No cached map yet but we have filtered lines
+        if self.cached_visual_line_map.is_empty() && !self.cached_filtered_lines.is_empty() {
+            return true;
+        }
+        
+        // 2. Width changed (terminal resize or first render)
+        if self.cached_viewport_width != viewport_width {
+            return true;
+        }
+        
+        // 3. Map length doesn't match filtered lines (filter changed)
+        if self.cached_visual_line_map.len() != self.cached_filtered_lines.len() {
+            return true;
+        }
+        
+        false
+    }
+    
+    /// Calculate the visual line map for the current filtered lines
+    /// This determines how many visual lines each logical line occupies at the given width
+    /// Returns (visual_line_mappings, total_visual_lines)
+    fn calculate_visual_line_map(&self, viewport_width: u16) -> (Vec<VisualLineMapping>, usize) {
+        let mut mappings = Vec::with_capacity(self.cached_filtered_lines.len());
+        let mut current_visual_line = 0;
+        
+        // Account for borders: 2 chars for left/right borders
+        let content_width = viewport_width.saturating_sub(2);
+        
+        if content_width == 0 {
+            // Terminal too narrow, can't wrap anything
+            return (mappings, 0);
+        }
+        
+        for (logical_idx, (_original_idx, line_content)) in 
+            self.cached_filtered_lines.iter().enumerate() 
+        {
+            // Build a temporary Line to calculate wrapping
+            // Don't skip date/timezone for accurate width calculation
+            let colored_line = colorize_log_line_with_options(
+                line_content,
+                None,  // Don't skip date for accurate width calculation
+                None   // Don't skip timezone for accurate width calculation
+            );
+            
+            // Create a temporary Paragraph with wrapping to calculate line count
+            let temp_paragraph = Paragraph::new(colored_line)
+                .wrap(Wrap { trim: false });
+            
+            // Use ratatui's built-in line_count() - accounts for unicode, styles, etc.
+            let wrapped_line_count = temp_paragraph.line_count(content_width).max(1);
+            
+            mappings.push(VisualLineMapping {
+                logical_index: logical_idx,
+                visual_start: current_visual_line,
+                visual_end: current_visual_line + wrapped_line_count,
+                line_count: wrapped_line_count,
+            });
+            
+            current_visual_line += wrapped_line_count;
+        }
+        
+        let total_visual_lines = current_visual_line;
+        (mappings, total_visual_lines)
+    }
+    
+    /// Find which logical line(s) are visible at a given visual scroll position
+    /// Returns (logical_start_idx, visual_offset_in_first_line, logical_end_idx)
+    fn visual_to_logical_range(
+        &self,
+        visual_scroll: usize,
+        viewport_height: usize,
+    ) -> (usize, usize, usize) {
+        if self.cached_visual_line_map.is_empty() {
+            return (0, 0, 0);
+        }
+        
+        let visual_end = visual_scroll + viewport_height;
+        
+        // Binary search for the logical line containing visual_scroll
+        let start_idx = self.cached_visual_line_map
+            .binary_search_by(|mapping| {
+                if visual_scroll < mapping.visual_start {
+                    std::cmp::Ordering::Greater
+                } else if visual_scroll >= mapping.visual_end {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .unwrap_or_else(|insert_pos| insert_pos.min(self.cached_visual_line_map.len().saturating_sub(1)));
+        
+        // Calculate offset within the first logical line
+        let start_mapping = &self.cached_visual_line_map[start_idx];
+        let visual_offset = visual_scroll.saturating_sub(start_mapping.visual_start);
+        
+        // Find last logical line that's visible
+        let end_idx = self.cached_visual_line_map
+            .iter()
+            .position(|mapping| mapping.visual_start >= visual_end)
+            .unwrap_or(self.cached_visual_line_map.len());
+        
+        (start_idx, visual_offset, end_idx)
+    }
+    
+    /// Get the visual line range for a logical line index
+    fn logical_to_visual_range(&self, logical_idx: usize) -> Option<(usize, usize)> {
+        self.cached_visual_line_map
+            .get(logical_idx)
+            .map(|mapping| (mapping.visual_start, mapping.visual_end))
+    }
 }
 
 impl Default for LogModel {
@@ -309,7 +439,7 @@ impl Model for LogModel {
                     return (None, vec![]);
                 }
                 
-                // Handle standard scrolling keybinds
+                // Handle standard scrolling keybinds (now operates on visual lines)
                 if handle_vertical_scroll_keys(
                     &mut self.vertical_scroll,
                     &mut self.vertical_scroll_state,
@@ -321,23 +451,6 @@ impl Model for LogModel {
                         return (None, vec![msg]);
                     }
                     return (None, vec![]);
-                }
-                
-                // Handle horizontal scrolling with Shift+H/L
-                if key.modifiers == KeyModifiers::SHIFT {
-                    match key.code {
-                        KeyCode::Char('H') | KeyCode::Char('h') => {
-                            // Scroll left
-                            self.horizontal_scroll = self.horizontal_scroll.saturating_sub(5);
-                            return (None, vec![]);
-                        }
-                        KeyCode::Char('L') | KeyCode::Char('l') => {
-                            // Scroll right
-                            self.horizontal_scroll = self.horizontal_scroll.saturating_add(5);
-                            return (None, vec![]);
-                        }
-                        _ => {}
-                    }
                 }
                 
                 match key.code {
@@ -384,10 +497,10 @@ impl Model for LogModel {
                         }]);
                     }
                     KeyCode::Char('G') => {
-                        // Jump to bottom
-                        if !self.cached_lines.is_empty() {
-                            let total_lines = self.cached_lines.len();
-                            let max_scroll = total_lines.saturating_sub(self.last_viewport_height);
+                        // Jump to bottom (in visual lines)
+                        if !self.cached_visual_line_map.is_empty() {
+                            let max_scroll = self.cached_total_visual_lines
+                                .saturating_sub(self.last_viewport_height);
                             self.vertical_scroll = max_scroll;
                             self.vertical_scroll_state = self.vertical_scroll_state.position(max_scroll);
                         }
@@ -540,8 +653,9 @@ impl Widget for &mut LogModel {
         let log_data = self.current_log_data.as_ref().unwrap();
         let total_tries = self.tries.unwrap_or(1) as usize;
         
-        // Cache viewport height for auto-load check
+        // Cache viewport dimensions
         // Subtract 2 for top and bottom borders (BorderType::Rounded with Borders::ALL)
+        let viewport_width = area.width;
         self.last_viewport_height = (area.height as usize).saturating_sub(2);
         
         // Check if we need to reparse (content changed)
@@ -595,28 +709,89 @@ impl Widget for &mut LogModel {
             log::debug!("LOG FILTER - Filtered to {} lines", self.cached_filtered_lines.len());
         }
         
-        let all_lines = &self.cached_filtered_lines;
-        let total_lines = all_lines.len();
+        // Check if we need to recalculate visual line map (width change, content change, etc.)
+        if self.should_recalculate_visual_map(viewport_width) {
+            // Before recalculating, remember which logical line we're viewing
+            // so we can restore the position after wrapping changes
+            let old_logical_line = if !self.cached_visual_line_map.is_empty() {
+                // Find the logical line at the current scroll position
+                self.visual_to_logical_range(self.vertical_scroll, 1).0
+            } else {
+                0
+            };
+            
+            log::debug!("VISUAL MAP - Recalculating for width {} (was at logical line {})", 
+                viewport_width, old_logical_line);
+            
+            let (map, total) = self.calculate_visual_line_map(viewport_width);
+            self.cached_visual_line_map = map;
+            self.cached_total_visual_lines = total;
+            self.cached_viewport_width = viewport_width;
+            
+            // Restore position: find the new visual line for the same logical line
+            if old_logical_line < self.cached_visual_line_map.len() {
+                let new_visual_pos = self.cached_visual_line_map[old_logical_line].visual_start;
+                self.vertical_scroll = new_visual_pos;
+                self.vertical_scroll_state = self.vertical_scroll_state.position(new_visual_pos);
+                log::debug!("VISUAL MAP - Restored to visual line {} (logical line {})", 
+                    new_visual_pos, old_logical_line);
+            }
+            
+            log::debug!("VISUAL MAP - Calculated {} visual lines from {} logical lines", 
+                total, self.cached_filtered_lines.len());
+        }
         
-        // VIRTUAL SCROLLING: Only build Line objects for visible window + buffer
-        // Calculate visible window with buffer for smoother scrolling
+        let total_visual_lines = self.cached_total_visual_lines;
+        
+        // VIRTUAL SCROLLING: Convert visual scroll to logical lines, then render with buffer
         let buffer_size = VIRTUAL_SCROLL_BUFFER;
         let viewport_height = self.last_viewport_height;
         
-        let start_line = self.vertical_scroll.saturating_sub(buffer_size);
-        let end_line = (self.vertical_scroll + viewport_height + buffer_size).min(total_lines);
+        // Convert visual scroll position to logical line range
+        let visual_scroll_start = self.vertical_scroll;
+        let visual_scroll_end = visual_scroll_start + viewport_height;
         
-        // Build Text with only visible lines (no padding), colorized
+        // Add buffer in visual line space
+        let visual_start_with_buffer = visual_scroll_start.saturating_sub(buffer_size);
+        let visual_end_with_buffer = (visual_scroll_end + buffer_size).min(total_visual_lines);
+        
+        // Find which logical lines correspond to this visual range (WITH buffer)
+        let (logical_start, _visual_offset_in_buffered, logical_end) = self.visual_to_logical_range(
+            visual_start_with_buffer,
+            visual_end_with_buffer.saturating_sub(visual_start_with_buffer)
+        );
+        
+        // Now find the actual scroll position (WITHOUT buffer) to get the real offset
+        let (logical_start_actual, visual_offset_actual, _) = self.visual_to_logical_range(
+            visual_scroll_start,
+            viewport_height
+        );
+        
+        // We only use logical_start_actual to verify we got the same line
+        // The paragraph_scroll_offset should be relative to the ACTUAL scroll position
+        let paragraph_scroll_offset = if logical_start == logical_start_actual {
+            visual_offset_actual
+        } else {
+            // Buffer caused us to start earlier, so we need to account for that
+            // The offset is from the actual scroll position within the buffered content
+            let first_logical_visual_start = self.cached_visual_line_map
+                .get(logical_start)
+                .map(|m| m.visual_start)
+                .unwrap_or(0);
+            visual_scroll_start.saturating_sub(first_logical_visual_start)
+        };
+        
+        log::debug!("RENDER - Visual scroll: {}, Visual lines: {}, Logical range: {}-{}, Offset: {}", 
+            self.vertical_scroll, total_visual_lines, logical_start, logical_end, paragraph_scroll_offset);
+        
+        // Build Text with only visible logical lines (wrapping will happen in Paragraph)
         let mut content = Text::default();
-        if start_line < end_line && end_line <= all_lines.len() {
-            // Get cached date and timezone for skipping
+        if logical_start < logical_end && logical_end <= self.cached_filtered_lines.len() {
             let skip_date = self.cached_log_date.as_deref();
             let skip_timezone = self.cached_log_timezone.as_deref();
-            
-            // Track the last log level seen for coloring continuation lines
             let mut last_log_level: Option<String> = None;
             
-            for (_original_idx, line) in &all_lines[start_line..end_line] {
+            for (_original_idx, line) in &self.cached_filtered_lines[logical_start..logical_end] {
                 let colored_line = colorize_log_line_with_context(
                     line, 
                     skip_date, 
@@ -627,16 +802,9 @@ impl Widget for &mut LogModel {
             }
         }
         
-        // Calculate scroll offset relative to the windowed content
-        // The Paragraph's scroll should be: (actual_scroll - window_start)
-        let window_scroll = self.vertical_scroll.saturating_sub(start_line);
-        
-        log::debug!("RENDER - Total: {}, Window: {}-{}, Scroll: {} -> {}", 
-            total_lines, start_line, end_line, self.vertical_scroll, window_scroll);
-        
         // Build titles using helper methods
         let title = self.build_title_line(total_tries);
-        let bottom_title = self.build_bottom_title(total_lines, log_data);
+        let bottom_title = self.build_bottom_title(total_visual_lines, log_data);
         
         #[allow(clippy::cast_possible_truncation)]
         let paragraph = Paragraph::new(content)
@@ -648,21 +816,22 @@ impl Widget for &mut LogModel {
                     .title(title)
                     .title_bottom(bottom_title),
             )
-            // NO WRAPPING - long lines truncate at screen edge (like vim/less)
-            // This ensures 1 logical line = 1 visual line for accurate scrolling
+            // WRAPPING ENABLED - long lines wrap at screen edge for readability
+            // Visual line mapping ensures accurate scrolling despite wrap
             .style(Style::default().fg(Color::White))
-            .scroll((window_scroll as u16, self.horizontal_scroll));
+            .wrap(Wrap { trim: false })
+            .scroll((paragraph_scroll_offset as u16, 0));
         
         paragraph.render(area, buffer);
         
-        // Scrollbar - configure with total content length for proper thumb sizing
+        // Scrollbar - configure with total VISUAL line count for proper thumb sizing
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("↑"))
             .end_symbol(Some("↓"));
         
-        // Update scrollbar state with total content size
+        // Update scrollbar state with visual line counts (not logical lines)
         self.vertical_scroll_state = self.vertical_scroll_state
-            .content_length(total_lines)
+            .content_length(total_visual_lines)
             .viewport_content_length(viewport_height);
         
         scrollbar.render(area, buffer, &mut self.vertical_scroll_state);
